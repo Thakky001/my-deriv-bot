@@ -3,5 +3,5 @@ uvicorn==0.24.0
 websockets==12.0
 aiohttp==3.9.1
 pandas==2.1.3
-pandas-ta
+pandas-ta-classic
 python-dotenv==1.0.0
