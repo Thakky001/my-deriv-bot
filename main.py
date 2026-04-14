@@ -13,7 +13,7 @@ db = SupabaseDB()
 deriv = DerivWS(telegram)
 strategy = Strategy()
 
-bot_state = {"active_trade": False, "contract_id": None, "entry_price": 0, "sl": 0, "tp": 0, "is_breakeven": False}
+bot_state = {"active_trade": False, "contract_id": None, "entry_price": 0, "sl": 0, "tp": 0, "is_breakeven": False, "signal_type": ""}
 
 @app.on_event("startup")
 async def startup_event():
@@ -26,35 +26,81 @@ async def ping():
     return {"status": "alive"}
 
 async def active_trade_manager(msg):
-    """ จัดการ Break-even จาก Stream ของ proposal_open_contract """
+    """ จัดการออเดอร์, เช็คการชน SL/TP เบื้องหลัง และสั่ง Sell """
     if "proposal_open_contract" in msg:
         contract = msg["proposal_open_contract"]
         if not contract:
             return
 
-        profit = contract.get("profit", 0)
-        current_price = contract.get("current_spot")
+        c_id = contract.get("contract_id")
         
-        # ถ้ายอด Profit มากกว่า 1.5 ATR (จุดคุ้มทุน) และยังไม่ได้ทำ Break-even
-        # หมายเหตุ: ในระบบจริง ต้องคำนวณกำไรเทียบกับ Risk (Lot * Distance)
-        if profit > 0 and not bot_state["is_breakeven"]:
-            # Logic การอัปเดต SL บังทุนสำหรับ Multiplier
-            update_payload = {
-                "contract_update": 1,
-                "contract_id": bot_state["contract_id"],
-                "limit_order": {"stop_loss": bot_state["entry_price"]}
-            }
-            await deriv.send(update_payload)
-            bot_state["is_breakeven"] = True
-            await telegram.send(f"🛡️ <b>Break-even Triggered!</b> SL moved to entry.")
+        # ถ้ายังไม่มีรหัส contract (อาจเป็นเพราะ buy response มาทีหลังสตรีมนี้)
+        if bot_state["active_trade"] and bot_state["contract_id"] is None:
+            bot_state["contract_id"] = c_id
+            
+        # ถ้าไม่ได้รัน contract นี้ข้ามไป
+        if bot_state["contract_id"] and bot_state["contract_id"] != c_id:
+            return
 
-        # ออเดอร์ถูกปิดแล้ว
-        if contract.get("is_sold"):
+        profit = float(contract.get("profit", 0))
+        current_spot = float(contract.get("current_spot", 0))
+        entry_spot = float(contract.get("entry_spot", 0))
+        is_sold = bool(contract.get("is_sold", False))
+
+        # อัปเดต entry_price ล่าสุด
+        if entry_spot and bot_state["entry_price"] == 0:
+            bot_state["entry_price"] = entry_spot
+
+        if is_sold:
             bot_state["active_trade"] = False
             bot_state["contract_id"] = None
             bot_state["is_breakeven"] = False
-            await telegram.send(f"💰 <b>Trade Closed.</b> Profit: {profit}")
-            # Update DB state here (Loss streak, Daily profit)
+            bot_state["entry_price"] = 0
+            await telegram.send(f"💰 <b>Trade Closed.</b> Profit: {profit:.2f}")
+            return
+
+        if not current_spot or bot_state["entry_price"] == 0 or bot_state["sl"] == 0 or bot_state["tp"] == 0:
+            return
+
+        # คำนวณสัญญาณว่าเป็น BUY หรือ SELL
+        is_buy = bot_state["signal_type"] == 'BUY'
+        
+        should_close = False
+        close_reason = ""
+
+        # 1. เช็คเป้าหมาย SL / TP
+        if is_buy:
+            if current_spot <= bot_state["sl"]:
+                should_close, close_reason = True, "Stop Loss"
+            elif current_spot >= bot_state["tp"]:
+                should_close, close_reason = True, "Take Profit"
+        else:
+            if current_spot >= bot_state["sl"]:
+                should_close, close_reason = True, "Stop Loss"
+            elif current_spot <= bot_state["tp"]:
+                should_close, close_reason = True, "Take Profit"
+
+        if should_close:
+            await telegram.send(f"⚠️ <b>Triggering {close_reason}</b> manually! (Spot: {current_spot:.4f})")
+            sell_payload = {"sell": bot_state["contract_id"], "price": 0}
+            await deriv.send(sell_payload)
+            # ป้องกันยิงซ้ำ (รอ is_sold กลับมา)
+            bot_state["sl"] = 0
+            bot_state["tp"] = 0
+            return
+
+        # 2. เช็ค Break-even กันทุนถ้าราคาวิ่งไปถึง Risk/Reward 1:1
+        if not bot_state["is_breakeven"]:
+            diff_to_sl = abs(bot_state["entry_price"] - bot_state["sl"])
+            if diff_to_sl > 0:
+                if is_buy and current_spot >= bot_state["entry_price"] + diff_to_sl:
+                    bot_state["sl"] = bot_state["entry_price"]
+                    bot_state["is_breakeven"] = True
+                    await telegram.send("🛡️ <b>Break-even Triggered!</b> SL moved to entry.")
+                elif not is_buy and current_spot <= bot_state["entry_price"] - diff_to_sl:
+                    bot_state["sl"] = bot_state["entry_price"]
+                    bot_state["is_breakeven"] = True
+                    await telegram.send("🛡️ <b>Break-even Triggered!</b> SL moved to entry.")
 
 async def trading_loop():
     await deriv.connect()
@@ -73,6 +119,19 @@ async def trading_loop():
     while True:
         try:
             msg = await deriv.receive()
+            
+            # ดักจับผลลัพธ์จาก API หากเกิด Error หรือตอบกลับสถานะ
+            if "error" in msg:
+                await telegram.send(f"⚠️ <b>Deriv API Error:</b> {msg['error'].get('message', 'Unknown Error')}")
+                # หากเจอ Error ตอนที่ตั้ง Active ไปแล้ว แต่ยังไม่เกิด contract ให้ล้างค่ากลับมาเริ่มใหม่
+                if bot_state["active_trade"] and bot_state["contract_id"] is None:
+                    bot_state["active_trade"] = False
+                    bot_state["signal_type"] = ""
+            
+            if "buy" in msg:
+                buy_data = msg["buy"]
+                bot_state["contract_id"] = buy_data.get("contract_id")
+                await telegram.send(f"✅ <b>Order Placed!</b> Contract ID: {bot_state['contract_id']}")
             
             # จัดการ Active Trades (Break-even & Close)
             await active_trade_manager(msg)
@@ -111,10 +170,19 @@ async def trading_loop():
                                 
                                 if signal:
                                     last_processed_time = last_time
-                                    await telegram.send(f"🚨 <b>SIGNAL: {signal}</b>\nSL: {sl_dist:.4f} | TP: {tp_dist:.4f}")
+                                    current_price = df_target.iloc[-1]['close']
                                     
-                                    # ⚠️ ตรงนี้คือการยิง API ซื้อขายจริง 
-                                    # Payload นี้เป็นแค่ตัวอย่างสำหรับ Multiplier Contract
+                                    bot_state["signal_type"] = signal
+                                    if signal == 'BUY':
+                                        bot_state["sl"] = current_price - sl_dist
+                                        bot_state["tp"] = current_price + tp_dist
+                                    else:
+                                        bot_state["sl"] = current_price + sl_dist
+                                        bot_state["tp"] = current_price - tp_dist
+                                        
+                                    await telegram.send(f"🚨 <b>SIGNAL: {signal}</b>\nSL Price: {bot_state['sl']:.4f} | TP Price: {bot_state['tp']:.4f}")
+                                    
+                                    # ⚠️ ส่งยิง API ซื้อขาย โดยไม่ต้องแนบ limit_order ให้กวน API (บอทจะจัดการออกเอง)
                                     buy_payload = {
                                         "buy": 1,
                                         "price": 10, # Stake
@@ -124,17 +192,14 @@ async def trading_loop():
                                             "contract_type": "MULTUP" if signal == 'BUY' else "MULTDOWN",
                                             "currency": "USD",
                                             "multiplier": 100,
-                                            "symbol": SYMBOL,
-                                            "limit_order": {
-                                                "stop_loss": sl_dist,
-                                                "take_profit": tp_dist
-                                            }
+                                            "symbol": SYMBOL
                                         }
                                     }
                                     await deriv.send(buy_payload)
                                     bot_state["active_trade"] = True
+                                    bot_state["contract_id"] = None
+                                    bot_state["entry_price"] = 0
                                     bot_state["is_breakeven"] = False
-                                    # บอทจะได้รับ contract_id กลับมาใน msg ถัดไป และนำไปเก็บใน bot_state
                         
                         # เพิ่มแท่งใหม่และลบแท่งเก่าสุด
                         new_row = {"time": open_time, "open": float(ohlc['open']), "high": float(ohlc['high']), "low": float(ohlc['low']), "close": float(ohlc['close'])}
