@@ -15,6 +15,15 @@ class DerivWS:
             try:
                 self.ws = await websockets.connect(self.url, ping_interval=30, ping_timeout=10)
                 await self.send({"authorize": DERIV_TOKEN})
+                
+                # Wait for the authorization response before proceeding
+                auth_res = await self.receive()
+                if "error" in auth_res:
+                    error_message = auth_res["error"].get("message", "Unknown Auth Error")
+                    await self.telegram.send(f"❌ Auth Error: {error_message}")
+                    await asyncio.sleep(10)
+                    continue
+                
                 await self.telegram.send("✅ Connected to Deriv API")
                 return True
             except websockets.exceptions.InvalidStatusCode as e:
