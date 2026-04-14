@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 import asyncio
+import time
 import pandas as pd
 from deriv_ws import DerivWS
 from telegram_bot import TelegramAlert
@@ -13,7 +14,7 @@ db = SupabaseDB()
 deriv = DerivWS(telegram)
 strategy = Strategy()
 
-bot_state = {"active_trade": False, "contract_id": None, "entry_price": 0, "sl": 0, "tp": 0, "is_breakeven": False, "signal_type": ""}
+bot_state = {"active_trade": False, "contract_id": None, "entry_price": 0, "sl": 0, "tp": 0, "is_breakeven": False, "signal_type": "", "last_sell_time": 0}
 
 @app.on_event("startup")
 async def startup_event():
@@ -24,6 +25,11 @@ async def startup_event():
 @app.head("/ping")
 async def ping():
     return {"status": "alive"}
+
+@app.get("/")
+@app.head("/")
+async def root():
+    return {"status": "Deriv Bot API is running!"}
 
 async def active_trade_manager(msg):
     """ จัดการออเดอร์, เช็คการชน SL/TP เบื้องหลัง และสั่ง Sell """
@@ -81,12 +87,13 @@ async def active_trade_manager(msg):
                 should_close, close_reason = True, "Take Profit"
 
         if should_close:
-            await telegram.send(f"⚠️ <b>Triggering {close_reason}</b> manually! (Spot: {current_spot:.4f})")
-            sell_payload = {"sell": bot_state["contract_id"], "price": 0}
-            await deriv.send(sell_payload)
-            # ป้องกันยิงซ้ำ (รอ is_sold กลับมา)
-            bot_state["sl"] = 0
-            bot_state["tp"] = 0
+            current_time = time.time()
+            last_sell = bot_state.get("last_sell_time", 0)
+            if current_time - last_sell > 5:  # หน่วงเวลา 5 วินาทีหากยิงไม่ผ่าน
+                await telegram.send(f"⚠️ <b>Triggering {close_reason}</b> manually! (Spot: {current_spot:.4f})")
+                sell_payload = {"sell": bot_state["contract_id"], "price": 0}
+                await deriv.send(sell_payload)
+                bot_state["last_sell_time"] = current_time
             return
 
         # 2. เช็ค Break-even กันทุนถ้าราคาวิ่งไปถึง Risk/Reward 1:1
@@ -130,8 +137,12 @@ async def trading_loop():
             
             if "buy" in msg:
                 buy_data = msg["buy"]
-                bot_state["contract_id"] = buy_data.get("contract_id")
-                await telegram.send(f"✅ <b>Order Placed!</b> Contract ID: {bot_state['contract_id']}")
+                c_id = buy_data.get("contract_id")
+                bot_state["contract_id"] = c_id
+                # 🛡️ บังคับโฟกัสสตรีมของออเดอร์นี้โดยเฉพาะทันที (ป้องกันออเดอร์หาย)
+                if c_id:
+                    await deriv.send({"proposal_open_contract": 1, "contract_id": c_id, "subscribe": 1})
+                await telegram.send(f"✅ <b>Order Placed!</b> Contract ID: {c_id}")
             
             # จัดการ Active Trades (Break-even & Close)
             await active_trade_manager(msg)
