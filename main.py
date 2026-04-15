@@ -2,6 +2,7 @@ from fastapi import FastAPI
 import asyncio
 import time
 import pandas as pd
+import websockets
 from deriv_ws import DerivWS
 from telegram_bot import TelegramAlert
 from database import SupabaseDB
@@ -110,116 +111,118 @@ async def active_trade_manager(msg):
                     await telegram.send("🛡️ <b>Break-even Triggered!</b> SL moved to entry.")
 
 async def trading_loop():
-    await deriv.connect()
-    
-    # Subscribe to 1m and 15m candles
-    await deriv.send({"ticks_history": SYMBOL, "end": "latest", "count": 300, "granularity": 60, "style": "candles", "req_id": 1, "subscribe": 1})
-    await deriv.send({"ticks_history": SYMBOL, "end": "latest", "count": 300, "granularity": 900, "style": "candles", "req_id": 15, "subscribe": 1})
-    
-    # Subscribe to Open Contracts stream
-    await deriv.send({"proposal_open_contract": 1, "subscribe": 1})
-
     df_1m = pd.DataFrame()
     df_15m = pd.DataFrame()
     last_processed_time = None
 
-    while True:
+    while True:  # 🔁 ลูปชั้นนอก: ทำหน้าที่ Reconnect
         try:
-            msg = await deriv.receive()
+            await deriv.connect()
             
-            # ดักจับผลลัพธ์จาก API หากเกิด Error หรือตอบกลับสถานะ
-            if "error" in msg:
-                await telegram.send(f"⚠️ <b>Deriv API Error:</b> {msg['error'].get('message', 'Unknown Error')}")
-                # หากเจอ Error ตอนที่ตั้ง Active ไปแล้ว แต่ยังไม่เกิด contract ให้ล้างค่ากลับมาเริ่มใหม่
-                if bot_state["active_trade"] and bot_state["contract_id"] is None:
-                    bot_state["active_trade"] = False
-                    bot_state["signal_type"] = ""
-            
-            if "buy" in msg:
-                buy_data = msg["buy"]
-                c_id = buy_data.get("contract_id")
-                bot_state["contract_id"] = c_id
-                # 🛡️ บังคับโฟกัสสตรีมของออเดอร์นี้โดยเฉพาะทันที (ป้องกันออเดอร์หาย)
-                if c_id:
-                    await deriv.send({"proposal_open_contract": 1, "contract_id": c_id, "subscribe": 1})
-                await telegram.send(f"✅ <b>Order Placed!</b> Contract ID: {c_id}")
-            
-            # จัดการ Active Trades (Break-even & Close)
-            await active_trade_manager(msg)
+            # Subscribe ใหม่ทุกครั้งที่เชื่อมต่อสำเร็จ
+            await deriv.send({"ticks_history": SYMBOL, "end": "latest", "count": 300, "granularity": 60, "style": "candles", "req_id": 1, "subscribe": 1})
+            await deriv.send({"ticks_history": SYMBOL, "end": "latest", "count": 300, "granularity": 900, "style": "candles", "req_id": 15, "subscribe": 1})
+            await deriv.send({"proposal_open_contract": 1, "subscribe": 1})
 
-            # ดึงข้อมูลแท่งเทียน
-            if "candles" in msg:
-                req_id = msg.get("req_id")
-                candles = [{"time": c["epoch"], "open": float(c["open"]), "high": float(c["high"]), "low": float(c["low"]), "close": float(c["close"])} for c in msg["candles"]]
-                
-                if req_id == 1:
-                    df_1m = pd.DataFrame(candles)
-                elif req_id == 15:
-                    df_15m = pd.DataFrame(candles)
+            # 🛡️ ถ้าเน็ตหลุดตอนมีออเดอร์ค้างอยู่ ให้ Subscribe ติดตามออเดอร์เดิมต่อด้วย
+            if bot_state.get("contract_id"):
+                await deriv.send({"proposal_open_contract": 1, "contract_id": bot_state["contract_id"], "subscribe": 1})
 
-            # อัปเดตแท่งเทียนใหม่แบบ Real-time (ohlc stream)
-            if "ohlc" in msg:
-                ohlc = msg["ohlc"]
-                granularity = ohlc.get("granularity")
-                open_time = ohlc["open_time"]
+            while True:  # 🔁 ลูปชั้นใน: รับข้อมูลและเทรดไปเรื่อยๆ
+                msg = await deriv.receive()
                 
-                df_target = df_1m if granularity == 60 else df_15m
+                # ดักจับผลลัพธ์จาก API หากเกิด Error หรือตอบกลับสถานะ
+                if "error" in msg:
+                    await telegram.send(f"⚠️ <b>Deriv API Error:</b> {msg['error'].get('message', 'Unknown Error')}")
+                    if bot_state["active_trade"] and bot_state["contract_id"] is None:
+                        bot_state["active_trade"] = False
+                        bot_state["signal_type"] = ""
                 
-                if not df_target.empty:
-                    last_time = df_target.iloc[-1]['time']
+                if "buy" in msg:
+                    buy_data = msg["buy"]
+                    c_id = buy_data.get("contract_id")
+                    bot_state["contract_id"] = c_id
+                    if c_id:
+                        await deriv.send({"proposal_open_contract": 1, "contract_id": c_id, "subscribe": 1})
+                    await telegram.send(f"✅ <b>Order Placed!</b> Contract ID: {c_id}")
+                
+                # จัดการ Active Trades (Break-even & Close)
+                await active_trade_manager(msg)
+
+                # ดึงข้อมูลแท่งเทียน
+                if "candles" in msg:
+                    req_id = msg.get("req_id")
+                    candles = [{"time": c["epoch"], "open": float(c["open"]), "high": float(c["high"]), "low": float(c["low"]), "close": float(c["close"])} for c in msg["candles"]]
                     
-                    if open_time == last_time:
-                        # อัปเดตราคาในแท่งปัจจุบัน
-                        df_target.at[df_target.index[-1], 'close'] = float(ohlc['close'])
-                        df_target.at[df_target.index[-1], 'high'] = float(ohlc['high'])
-                        df_target.at[df_target.index[-1], 'low'] = float(ohlc['low'])
-                    elif open_time > last_time:
-                        # แท่งใหม่มา แปลว่าแท่งเก่าปิดสมบูรณ์แล้ว
-                        if granularity == 60 and not bot_state["active_trade"] and not df_15m.empty:
-                            if last_processed_time != last_time:
-                                signal, sl_dist, tp_dist = strategy.analyze(df_1m, df_15m)
-                                
-                                if signal:
-                                    last_processed_time = last_time
-                                    current_price = df_target.iloc[-1]['close']
-                                    
-                                    bot_state["signal_type"] = signal
-                                    if signal == 'BUY':
-                                        bot_state["sl"] = current_price - sl_dist
-                                        bot_state["tp"] = current_price + tp_dist
-                                    else:
-                                        bot_state["sl"] = current_price + sl_dist
-                                        bot_state["tp"] = current_price - tp_dist
-                                        
-                                    await telegram.send(f"🚨 <b>SIGNAL: {signal}</b>\nSL Price: {bot_state['sl']:.4f} | TP Price: {bot_state['tp']:.4f}")
-                                    
-                                    # ⚠️ ส่งยิง API ซื้อขาย โดยไม่ต้องแนบ limit_order ให้กวน API (บอทจะจัดการออกเอง)
-                                    buy_payload = {
-                                        "buy": 1,
-                                        "price": 10, # Stake
-                                        "parameters": {
-                                            "amount": 10,
-                                            "basis": "stake",
-                                            "contract_type": "MULTUP" if signal == 'BUY' else "MULTDOWN",
-                                            "currency": "USD",
-                                            "multiplier": 100,
-                                            "symbol": SYMBOL
-                                        }
-                                    }
-                                    await deriv.send(buy_payload)
-                                    bot_state["active_trade"] = True
-                                    bot_state["contract_id"] = None
-                                    bot_state["entry_price"] = 0
-                                    bot_state["is_breakeven"] = False
-                        
-                        # เพิ่มแท่งใหม่และลบแท่งเก่าสุด
-                        new_row = {"time": open_time, "open": float(ohlc['open']), "high": float(ohlc['high']), "low": float(ohlc['low']), "close": float(ohlc['close'])}
-                        new_df = pd.DataFrame([new_row])
-                        if granularity == 60:
-                            df_1m = pd.concat([df_1m, new_df], ignore_index=True).iloc[-300:]
-                        else:
-                            df_15m = pd.concat([df_15m, new_df], ignore_index=True).iloc[-300:]
+                    if req_id == 1:
+                        df_1m = pd.DataFrame(candles)
+                    elif req_id == 15:
+                        df_15m = pd.DataFrame(candles)
 
+                # อัปเดตแท่งเทียนใหม่แบบ Real-time (ohlc stream)
+                if "ohlc" in msg:
+                    ohlc = msg["ohlc"]
+                    granularity = ohlc.get("granularity")
+                    open_time = ohlc["open_time"]
+                    
+                    df_target = df_1m if granularity == 60 else df_15m
+                    
+                    if not df_target.empty:
+                        last_time = df_target.iloc[-1]['time']
+                        
+                        if open_time == last_time:
+                            df_target.at[df_target.index[-1], 'close'] = float(ohlc['close'])
+                            df_target.at[df_target.index[-1], 'high'] = float(ohlc['high'])
+                            df_target.at[df_target.index[-1], 'low'] = float(ohlc['low'])
+                        elif open_time > last_time:
+                            if granularity == 60 and not bot_state["active_trade"] and not df_15m.empty:
+                                if last_processed_time != last_time:
+                                    signal, sl_dist, tp_dist = strategy.analyze(df_1m, df_15m)
+                                    
+                                    if signal:
+                                        last_processed_time = last_time
+                                        current_price = df_target.iloc[-1]['close']
+                                        
+                                        bot_state["signal_type"] = signal
+                                        if signal == 'BUY':
+                                            bot_state["sl"] = current_price - sl_dist
+                                            bot_state["tp"] = current_price + tp_dist
+                                        else:
+                                            bot_state["sl"] = current_price + sl_dist
+                                            bot_state["tp"] = current_price - tp_dist
+                                            
+                                        await telegram.send(f"🚨 <b>SIGNAL: {signal}</b>\nSL: {bot_state['sl']:.4f} | TP: {bot_state['tp']:.4f}")
+                                        
+                                        buy_payload = {
+                                            "buy": 1,
+                                            "price": 10, 
+                                            "parameters": {
+                                                "amount": 10,
+                                                "basis": "stake",
+                                                "contract_type": "MULTUP" if signal == 'BUY' else "MULTDOWN",
+                                                "currency": "USD",
+                                                "multiplier": 100,
+                                                "symbol": SYMBOL
+                                            }
+                                        }
+                                        await deriv.send(buy_payload)
+                                        bot_state["active_trade"] = True
+                                        bot_state["contract_id"] = None
+                                        bot_state["entry_price"] = 0
+                                        bot_state["is_breakeven"] = False
+                            
+                            new_row = {"time": open_time, "open": float(ohlc['open']), "high": float(ohlc['high']), "low": float(ohlc['low']), "close": float(ohlc['close'])}
+                            new_df = pd.DataFrame([new_row])
+                            if granularity == 60:
+                                df_1m = pd.concat([df_1m, new_df], ignore_index=True).iloc[-300:]
+                            else:
+                                df_15m = pd.concat([df_15m, new_df], ignore_index=True).iloc[-300:]
+
+        except websockets.exceptions.ConnectionClosed as e:
+            # ดักจับเคสเน็ตหลุด / Websocket ปิดโดยเฉพาะ
+            await telegram.send(f"⚠️ <b>Connection Lost:</b> {str(e)}. Reconnecting in 5s...")
+            await asyncio.sleep(5)
         except Exception as e:
-            await telegram.send(f"❌ <b>Error:</b> {str(e)}")
+            # ดักจับ Error อื่นๆ
+            await telegram.send(f"❌ <b>System Error:</b> {str(e)}. Retrying in 5s...")
             await asyncio.sleep(5)
