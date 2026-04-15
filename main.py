@@ -53,7 +53,14 @@ async def startup_event():
     asyncio.create_task(trading_loop())
 
 @app.get("/ping")
-async def ping(): return {"status": "alive"}
+@app.head("/ping")  
+async def ping(): 
+    return {"status": "alive"}
+
+@app.get("/")
+@app.head("/")  
+async def root(): 
+    return {"status": "Deriv Bot API is running!"}
 
 async def sync_portfolio_state(msg):
     """ (Fix 1) ตรวจสอบพอร์ตจริงกับ DB ให้ตรงกัน """
