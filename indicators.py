@@ -54,6 +54,6 @@ class Strategy:
 
         # คำนวณระยะ SL/TP
         sl_dist = atr_val * 1.5
-        tp_dist = atr_val * 3.0
+        tp_dist = atr_val * 2.5
 
         return signal, sl_dist, tp_dist
