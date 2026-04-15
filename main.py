@@ -233,6 +233,14 @@ async def trading_loop():
                                             sl_amount = round((sl_dist / curr_price) * mult * stake, 2)
                                             tp_amount = stake * 0.20
 
+                                            max_sl = stake * 0.95
+                                            if sl_amount > max_sl:
+                                                sl_amount = max_sl
+
+                                            # 🐛 แนะนำให้ปริ้นท์ค่าดูใน Console เพื่อให้เห็นภาพ
+                                            print(f"🚀 เตรียมยิงออเดอร์ {signal} | Stake={stake}, Mult={mult}")
+                                            print(f"📊 SL Amount: {sl_amount} USD | TP Amount: {tp_amount} USD")
+
                                             await update_state({
                                                 "signal_type": signal, "sl": sl_price, "tp": tp_price, 
                                                 "active_trade": True, "is_breakeven": False, "entry_price": 0
