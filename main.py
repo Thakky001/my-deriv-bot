@@ -231,7 +231,7 @@ async def trading_loop():
                                             stake = 10 
                                             mult = 100
                                             sl_amount = round((sl_dist / curr_price) * mult * stake, 2)
-                                            tp_amount = stake * 0.20
+                                            tp_amount = round((tp_dist / curr_price) * mult * stake, 2)
 
                                             max_sl = stake * 0.95
                                             if sl_amount > max_sl:
