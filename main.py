@@ -161,7 +161,17 @@ async def trading_loop():
             req_1m, req_15m = await request_history()
 
             while True:
-                msg = await deriv.receive()
+                try:
+                    # 🛡️ Watchdog: ใส่ Timeout 30 วินาที ป้องกันการค้าง
+                    # ถ้าเกิน 30 วิไม่มีข้อมูลเข้าเลย ให้เตะออกไป Reconnect ใหม่
+                    msg = await asyncio.wait_for(deriv.receive(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    print("⏳ Connection frozen (Watchdog Timeout). Forcing reconnect...")
+                    await telegram.send("🔄 <b>Watchdog:</b> ตรวจพบเซิร์ฟเวอร์เงียบเกิน 30 วิ กำลังรีเซ็ตการเชื่อมต่อ...")
+                    break  # ทะลุออกจาก Loop เล็ก เพื่อไปเริ่ม connect ใหม่ใน Loop ใหญ่
+
+                if not msg:
+                    continue
                 
                 await sync_portfolio_state(msg)
                 
