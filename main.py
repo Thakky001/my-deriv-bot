@@ -167,9 +167,19 @@ async def trading_loop():
                 
                 if "error" in msg:
                     err = msg['error'].get('message', 'Unknown')
-                    await telegram.send(f"⚠️ <b>API Error:</b> {err}")
-                    if bot_state["active_trade"] and bot_state["contract_id"] is None:
-                        await update_state({"active_trade": False, "signal_type": ""})
+                    
+                    # 1. เช็คคำศัพท์ที่เป็น Error ปกติของการแย่งกันปิดออเดอร์
+                    ignore_keywords = ["expired", "sold", "invalid contract"]
+                    err_lower = err.lower()
+                    
+                    if any(keyword in err_lower for keyword in ignore_keywords):
+                        # ถ้าระบบบอกว่าปิดไปแล้ว ให้แค่แสดงใน Console แต่ไม่ต้องส่งเข้า Telegram
+                        print(f"Ignored Harmless Error: {err}")
+                    else:
+                        # 2. ถ้าเป็น Error ร้ายแรงอื่นๆ ค่อยแจ้งเตือน
+                        await telegram.send(f"⚠️ <b>API Error:</b> {err}")
+                        if bot_state["active_trade"] and bot_state["contract_id"] is None:
+                            await update_state({"active_trade": False, "signal_type": ""})
                 
                 if "buy" in msg:
                     c_id = msg["buy"].get("contract_id")
