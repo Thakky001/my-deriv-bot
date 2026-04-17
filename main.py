@@ -240,30 +240,30 @@ async def active_trade_manager(msg):
             await telegram.send(f"{emoji} <b>Trade Closed!</b>\nProfit: {profit:.2f} USD\n📅 Today: {daily_stats[today_str]['profit']:.2f} USD\n💰 Total: {new_profit:.2f} USD")
             return
 
-        # Failsafe Local Cut
-        if current_spot > 0 and bot_state["sl"] > 0:
-            is_buy = bot_state["signal_type"] == 'BUY'
-            should_close = (is_buy and (current_spot <= bot_state["sl"] or current_spot >= bot_state["tp"])) or \
-                           (not is_buy and (current_spot >= bot_state["sl"] or current_spot <= bot_state["tp"]))
+        # # Failsafe Local Cut
+        # if current_spot > 0 and bot_state["sl"] > 0:
+        #     is_buy = bot_state["signal_type"] == 'BUY'
+        #     should_close = (is_buy and (current_spot <= bot_state["sl"] or current_spot >= bot_state["tp"])) or \
+        #                    (not is_buy and (current_spot >= bot_state["sl"] or current_spot <= bot_state["tp"]))
 
-            if should_close:
-                current_time = time.time()
-                if not local_mem["sell_triggered"] and (current_time - local_mem["last_sell_time"] > 10):
-                    await deriv.send({"sell": c_id, "price": 0})
-                    local_mem["last_sell_time"] = current_time
-                    local_mem["sell_triggered"] = True
-                    await telegram.send(f"⚠️ <b>Triggering Manual Sell!</b> (Spot: {current_spot:.4f})")
+        #     if should_close:
+        #         current_time = time.time()
+        #         if not local_mem["sell_triggered"] and (current_time - local_mem["last_sell_time"] > 10):
+        #             await deriv.send({"sell": c_id, "price": 0})
+        #             local_mem["last_sell_time"] = current_time
+        #             local_mem["sell_triggered"] = True
+        #             await telegram.send(f"⚠️ <b>Triggering Manual Sell!</b> (Spot: {current_spot:.4f})")
 
-        # Break-even Logic
-        if not bot_state["is_breakeven"] and bot_state["entry_price"] > 0:
-            diff_to_sl = abs(bot_state["entry_price"] - bot_state["sl"])
-            if diff_to_sl > 0:
-                is_buy = bot_state["signal_type"] == 'BUY'
-                triggered = (is_buy and current_spot >= bot_state["entry_price"] + diff_to_sl) or \
-                            (not is_buy and current_spot <= bot_state["entry_price"] - diff_to_sl)
-                if triggered:
-                    await update_state({"sl": bot_state["entry_price"], "is_breakeven": True})
-                    await telegram.send("🛡️ <b>Break-even:</b> ขยับ SL บังทุนแล้ว")
+        # # Break-even Logic
+        # if not bot_state["is_breakeven"] and bot_state["entry_price"] > 0:
+        #     diff_to_sl = abs(bot_state["entry_price"] - bot_state["sl"])
+        #     if diff_to_sl > 0:
+        #         is_buy = bot_state["signal_type"] == 'BUY'
+        #         triggered = (is_buy and current_spot >= bot_state["entry_price"] + diff_to_sl) or \
+        #                     (not is_buy and current_spot <= bot_state["entry_price"] - diff_to_sl)
+        #         if triggered:
+        #             await update_state({"sl": bot_state["entry_price"], "is_breakeven": True})
+        #             await telegram.send("🛡️ <b>Break-even:</b> ขยับ SL บังทุนแล้ว")
 
 async def request_history():
     req_1m = int(time.time() * 1000) % 10000 
