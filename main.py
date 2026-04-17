@@ -286,74 +286,48 @@ async def active_trade_manager(msg):
 
         c_id = contract.get("contract_id")
         
+        # ถ้าเป็นสัญญาใหม่ที่เพิ่งซื้อ ให้บันทึก ID ไว้
         if bot_state["active_trade"] and bot_state["contract_id"] is None:
             await update_state({"contract_id": c_id})
             
-        if bot_state["contract_id"] and bot_state["contract_id"] != c_id: return
+        # ตรวจสอบว่า ID ตรงกับที่เราถืออยู่หรือไม่
+        if bot_state["contract_id"] != c_id: return
 
         profit = float(contract.get("profit", 0))
-        current_spot = float(contract.get("current_spot", 0))
-        entry_spot = float(contract.get("entry_spot", 0))
         is_sold = bool(contract.get("is_sold", False))
+        entry_spot = float(contract.get("entry_spot", 0))
 
         if entry_spot and bot_state["entry_price"] == 0:
             await update_state({"entry_price": entry_spot})
 
         if is_sold:
-            # 1. จัดการสถิติ All-time
+            # บันทึกสถิติ (โค้ดส่วนนี้สำคัญมาก)
             new_profit = bot_state.get("total_profit", 0.0) + profit
             wins = bot_state.get("win_count", 0) + (1 if profit > 0 else 0)
             losses = bot_state.get("loss_count", 0) + (1 if profit <= 0 else 0)
 
-            # 2. จัดการสถิติรายวัน (Daily Stats)
             today_str = datetime.now().strftime("%Y-%m-%d")
             daily_stats = bot_state.get("daily_stats", {})
-            
             if today_str not in daily_stats:
                 daily_stats[today_str] = {"profit": 0.0, "wins": 0, "losses": 0}
-                
+            
             daily_stats[today_str]["profit"] += profit
             daily_stats[today_str]["wins"] += (1 if profit > 0 else 0)
             daily_stats[today_str]["losses"] += (1 if profit <= 0 else 0)
 
-            # 3. อัปเดตลง State Database
+            # อัปเดต DB และแจ้งเตือน Telegram
             await update_state({
                 "active_trade": False, "contract_id": None, 
-                "is_breakeven": False, "entry_price": 0, "sl": 0, "tp": 0, "signal_type": "",
                 "total_profit": new_profit, "win_count": wins, "loss_count": losses,
-                "daily_stats": daily_stats
+                "daily_stats": daily_stats, "is_breakeven": False, "signal_type": ""
             })
-            local_mem["sell_triggered"] = False
-            await deriv.send({"forget_all": "proposal_open_contract"})
             
             emoji = "🟢" if profit > 0 else "🔴"
-            await telegram.send(f"{emoji} <b>Trade Closed!</b>\nProfit: {profit:.2f} USD\n📅 Today: {daily_stats[today_str]['profit']:.2f} USD\n💰 Total: {new_profit:.2f} USD")
+            await telegram.send(f"{emoji} <b>Trade Closed!</b>\nProfit: {profit:.2f} USD\n📅 Today: {daily_stats[today_str]['profit']:.2f} USD")
+            
+            # ล้าง Subscription
+            await deriv.send({"forget_all": "proposal_open_contract"})
             return
-
-        # # Failsafe Local Cut
-        # if current_spot > 0 and bot_state["sl"] > 0:
-        #     is_buy = bot_state["signal_type"] == 'BUY'
-        #     should_close = (is_buy and (current_spot <= bot_state["sl"] or current_spot >= bot_state["tp"])) or \
-        #                    (not is_buy and (current_spot >= bot_state["sl"] or current_spot <= bot_state["tp"]))
-
-        #     if should_close:
-        #         current_time = time.time()
-        #         if not local_mem["sell_triggered"] and (current_time - local_mem["last_sell_time"] > 10):
-        #             await deriv.send({"sell": c_id, "price": 0})
-        #             local_mem["last_sell_time"] = current_time
-        #             local_mem["sell_triggered"] = True
-        #             await telegram.send(f"⚠️ <b>Triggering Manual Sell!</b> (Spot: {current_spot:.4f})")
-
-        # # Break-even Logic
-        # if not bot_state["is_breakeven"] and bot_state["entry_price"] > 0:
-        #     diff_to_sl = abs(bot_state["entry_price"] - bot_state["sl"])
-        #     if diff_to_sl > 0:
-        #         is_buy = bot_state["signal_type"] == 'BUY'
-        #         triggered = (is_buy and current_spot >= bot_state["entry_price"] + diff_to_sl) or \
-        #                     (not is_buy and current_spot <= bot_state["entry_price"] - diff_to_sl)
-        #         if triggered:
-        #             await update_state({"sl": bot_state["entry_price"], "is_breakeven": True})
-        #             await telegram.send("🛡️ <b>Break-even:</b> ขยับ SL บังทุนแล้ว")
 
 async def request_history():
     req_1m = int(time.time() * 1000) % 10000 
