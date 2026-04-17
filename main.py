@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import asyncio
 import time
+from datetime import datetime
 import pandas as pd
 from collections import deque
 import websockets
@@ -17,7 +18,7 @@ db = SupabaseDB()
 deriv = DerivWS(telegram)
 strategy = Strategy()
 
-# (Fix 2) Deque สำหรับเก็บข้อมูลกราฟ
+# Deque สำหรับเก็บข้อมูลกราฟ
 candles_1m = deque(maxlen=300)
 candles_15m = deque(maxlen=300)
 
@@ -29,13 +30,14 @@ bot_state = {
     "tp": 0, 
     "is_breakeven": False, 
     "signal_type": "",
-    # ระบบเก็บสถิติผลประกอบการ
     "total_profit": 0.0,
     "win_count": 0,
-    "loss_count": 0
+    "loss_count": 0,
+    # เพิ่มระบบเก็บสถิติแยกรายวัน
+    "daily_stats": {} 
 }
 
-# (Fix 3) จัดการข้อมูลชั่วคราวใน Memory
+# จัดการข้อมูลชั่วคราวใน Memory
 local_mem = {
     "last_sell_time": 0,
     "sell_triggered": False 
@@ -64,36 +66,111 @@ async def ping():
 
 @app.get("/", response_class=HTMLResponse)
 async def root(): 
-    """ หน้า Dashboard เช็คผลประกอบการแบบ Real-time """
+    """ หน้า Dashboard เช็คผลประกอบการรายวันและรายเดือน """
     wins = bot_state.get("win_count", 0)
     losses = bot_state.get("loss_count", 0)
     total_trades = wins + losses
     profit = bot_state.get("total_profit", 0.0)
     win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
     
+    daily_stats = bot_state.get("daily_stats", {})
+    monthly_stats = {}
+    daily_rows_html = ""
+    monthly_rows_html = ""
+
+    # เรียงวันที่จากล่าสุดไปเก่าสุด
+    sorted_dates = sorted(daily_stats.keys(), reverse=True)
+
+    for date_str in sorted_dates:
+        day_data = daily_stats[date_str]
+        month_str = date_str[:7] # ดึงแค่ YYYY-MM
+        
+        # สะสมยอดรายเดือน
+        if month_str not in monthly_stats:
+            monthly_stats[month_str] = {"profit": 0.0, "wins": 0, "losses": 0}
+        
+        monthly_stats[month_str]["profit"] += day_data["profit"]
+        monthly_stats[month_str]["wins"] += day_data["wins"]
+        monthly_stats[month_str]["losses"] += day_data["losses"]
+
+        # สร้างแถวตารางรายวัน
+        d_trades = day_data["wins"] + day_data["losses"]
+        d_rate = (day_data["wins"] / d_trades * 100) if d_trades > 0 else 0
+        d_color = "#2ecc71" if day_data["profit"] >= 0 else "#e74c3c"
+        daily_rows_html += f"<tr><td>{date_str}</td><td>{d_trades}</td><td>{d_rate:.1f}%</td><td style='color:{d_color}; font-weight:bold;'>{day_data['profit']:.2f}</td></tr>"
+
+    # สร้างแถวตารางรายเดือน
+    for m_str, m_data in monthly_stats.items():
+        m_trades = m_data["wins"] + m_data["losses"]
+        m_rate = (m_data["wins"] / m_trades * 100) if m_trades > 0 else 0
+        m_color = "#2ecc71" if m_data["profit"] >= 0 else "#e74c3c"
+        monthly_rows_html += f"<tr><td>{m_str}</td><td>{m_trades}</td><td>{m_rate:.1f}%</td><td style='color:{m_color}; font-weight:bold;'>{m_data['profit']:.2f}</td></tr>"
+
+    if not daily_rows_html:
+        daily_rows_html = "<tr><td colspan='4' style='text-align:center;'>ยังไม่มีข้อมูล</td></tr>"
+    if not monthly_rows_html:
+        monthly_rows_html = "<tr><td colspan='4' style='text-align:center;'>ยังไม่มีข้อมูล</td></tr>"
+
     html_content = f"""
     <html>
         <head>
             <title>Deriv Bot Dashboard</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
-                body {{ font-family: sans-serif; background-color: #f0f2f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }}
-                .card {{ background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); width: 90%; max-width: 400px; text-align: center; }}
-                h2 {{ color: #1c1e21; margin-bottom: 1.5rem; }}
-                .stat {{ display: flex; justify-content: space-between; padding: 0.8rem 0; border-bottom: 1px solid #eee; }}
-                .stat:last-child {{ border-bottom: none; }}
-                .val {{ font-weight: bold; }}
+                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f0f2f5; color: #333; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }}
+                .container {{ width: 100%; max-width: 600px; }}
+                .card {{ background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); margin-bottom: 20px; }}
+                h2, h3 {{ color: #1c1e21; margin-top: 0; text-align: center; }}
+                .stat-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 10px; }}
+                .stat-box {{ background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; }}
+                .stat-label {{ font-size: 12px; color: #666; text-transform: uppercase; letter-spacing: 1px; }}
+                .stat-value {{ font-size: 24px; font-weight: bold; margin-top: 5px; }}
                 .profit {{ color: {'#2ecc71' if profit >= 0 else '#e74c3c'}; }}
+                table {{ width: 100%; border-collapse: collapse; font-size: 14px; text-align: right; }}
+                th, td {{ padding: 10px; border-bottom: 1px solid #eee; }}
+                th {{ text-align: right; color: #666; font-weight: normal; font-size: 12px; text-transform: uppercase; }}
+                th:first-child, td:first-child {{ text-align: left; }}
             </style>
         </head>
         <body>
-            <div class="card">
-                <h2>🤖 Bot Dashboard</h2>
-                <div class="stat"><span>สถานะ:</span> <span class="val" style="color: #2ecc71;">● Running</span></div>
-                <div class="stat"><span>เทรดทั้งหมด:</span> <span class="val">{total_trades} ไม้</span></div>
-                <div class="stat"><span>Win Rate:</span> <span class="val">{win_rate:.1f}%</span></div>
-                <div class="stat"><span>ชนะ / แพ้:</span> <span class="val">{wins} / {losses}</span></div>
-                <div class="stat"><span>กำไรรวม:</span> <span class="val profit">{profit:.2f} USD</span></div>
+            <div class="container">
+                <div class="card">
+                    <h2>🤖 ภาพรวมพอร์ต (All-Time)</h2>
+                    <div class="stat-grid">
+                        <div class="stat-box">
+                            <div class="stat-label">กำไรรวม (USD)</div>
+                            <div class="stat-value profit">{profit:.2f}</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">อัตราชนะ (Win Rate)</div>
+                            <div class="stat-value">{win_rate:.1f}%</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">เทรดทั้งหมด</div>
+                            <div class="stat-value">{total_trades}</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">ชนะ / แพ้</div>
+                            <div class="stat-value"><span style="color:#2ecc71">{wins}</span> / <span style="color:#e74c3c">{losses}</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3>📅 สรุปรายเดือน (Monthly)</h3>
+                    <table>
+                        <tr><th>เดือน</th><th>จำนวนเทรด</th><th>Win Rate</th><th>กำไร</th></tr>
+                        {monthly_rows_html}
+                    </table>
+                </div>
+
+                <div class="card">
+                    <h3>📝 สถิติรายวัน (Daily)</h3>
+                    <table>
+                        <tr><th>วันที่</th><th>จำนวนเทรด</th><th>Win Rate</th><th>กำไร</th></tr>
+                        {daily_rows_html}
+                    </table>
+                </div>
             </div>
         </body>
     </html>
@@ -101,7 +178,6 @@ async def root():
     return html_content
 
 async def sync_portfolio_state(msg):
-    """ (Fix 1) ตรวจสอบพอร์ตจริงกับ DB """
     if "portfolio" in msg:
         contracts = msg["portfolio"].get("contracts", [])
         active_ids = [c["contract_id"] for c in contracts]
@@ -134,21 +210,34 @@ async def active_trade_manager(msg):
             await update_state({"entry_price": entry_spot})
 
         if is_sold:
-            # อัปเดตสถิติผลประกอบการ
+            # 1. จัดการสถิติ All-time
             new_profit = bot_state.get("total_profit", 0.0) + profit
             wins = bot_state.get("win_count", 0) + (1 if profit > 0 else 0)
             losses = bot_state.get("loss_count", 0) + (1 if profit <= 0 else 0)
 
+            # 2. จัดการสถิติรายวัน (Daily Stats)
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            daily_stats = bot_state.get("daily_stats", {})
+            
+            if today_str not in daily_stats:
+                daily_stats[today_str] = {"profit": 0.0, "wins": 0, "losses": 0}
+                
+            daily_stats[today_str]["profit"] += profit
+            daily_stats[today_str]["wins"] += (1 if profit > 0 else 0)
+            daily_stats[today_str]["losses"] += (1 if profit <= 0 else 0)
+
+            # 3. อัปเดตลง State Database
             await update_state({
                 "active_trade": False, "contract_id": None, 
                 "is_breakeven": False, "entry_price": 0, "sl": 0, "tp": 0, "signal_type": "",
-                "total_profit": new_profit, "win_count": wins, "loss_count": losses
+                "total_profit": new_profit, "win_count": wins, "loss_count": losses,
+                "daily_stats": daily_stats
             })
             local_mem["sell_triggered"] = False
             await deriv.send({"forget_all": "proposal_open_contract"})
             
             emoji = "🟢" if profit > 0 else "🔴"
-            await telegram.send(f"{emoji} <b>Trade Closed!</b>\nProfit: {profit:.2f} USD\n💰 Total: {new_profit:.2f} USD")
+            await telegram.send(f"{emoji} <b>Trade Closed!</b>\nProfit: {profit:.2f} USD\n📅 Today: {daily_stats[today_str]['profit']:.2f} USD\n💰 Total: {new_profit:.2f} USD")
             return
 
         # Failsafe Local Cut
@@ -195,7 +284,7 @@ async def trading_loop():
 
             while True:
                 try:
-                    # 🛡️ Watchdog: กันบอทค้างถ้านิ่งเกิน 30 วิ
+                    # Watchdog
                     msg = await asyncio.wait_for(deriv.receive(), timeout=30.0)
                 except asyncio.TimeoutError:
                     print("⏳ Connection frozen (Watchdog). Reconnecting...")
@@ -209,7 +298,6 @@ async def trading_loop():
                     err = msg['error'].get('message', 'Unknown')
                     err_lower = err.lower()
                     
-                    # 🛠️ Auto-Reset เมื่อเจอ Error ที่ทำให้ State ค้าง
                     force_reset_keywords = ["process your trade", "invalid contract", "sold", "expired"]
                     
                     if any(keyword in err_lower for keyword in force_reset_keywords):
