@@ -177,16 +177,35 @@ async def trading_loop():
                 
                 if "error" in msg:
                     err = msg['error'].get('message', 'Unknown')
-                    
-                    # 1. เช็คคำศัพท์ที่เป็น Error ปกติของการแย่งกันปิดออเดอร์
-                    ignore_keywords = ["expired", "sold", "invalid contract"]
                     err_lower = err.lower()
                     
-                    if any(keyword in err_lower for keyword in ignore_keywords):
-                        # ถ้าระบบบอกว่าปิดไปแล้ว ให้แค่แสดงใน Console แต่ไม่ต้องส่งเข้า Telegram
-                        print(f"Ignored Harmless Error: {err}")
+                    # คีย์เวิร์ดที่แสดงว่าออเดอร์อาจจะปิดไปแล้ว หรือมีปัญหาการขาย
+                    force_reset_keywords = ["process your trade", "invalid contract", "sold", "expired"]
+                    
+                    if any(keyword in err_lower for keyword in force_reset_keywords):
+                        print(f"Auto-Resetting State due to Error: {err}")
+                        await telegram.send(f"🔄 <b>Auto-Reset:</b> รีเซ็ตสถานะบอทให้ว่าง เพื่อหาออเดอร์ใหม่ (สาเหตุ: {err})")
+                        
+                        # 1. บังคับล้าง State ให้เป็นพอร์ตว่าง
+                        await update_state({
+                            "active_trade": False, 
+                            "contract_id": None, 
+                            "is_breakeven": False, 
+                            "entry_price": 0, 
+                            "sl": 0, 
+                            "tp": 0, 
+                            "signal_type": ""
+                        })
+                        local_mem["sell_triggered"] = False
+                        
+                        # 2. ล้างการติดตามสัญญาเดิมที่ค้างในระบบ
+                        await deriv.send({"forget_all": "proposal_open_contract"})
+                        
+                        # 3. ร้องขอตรวจสอบพอร์ตปัจจุบันอีกรอบเพื่อความชัวร์
+                        await deriv.send({"portfolio": 1})
+                        
                     else:
-                        # 2. ถ้าเป็น Error ร้ายแรงอื่นๆ ค่อยแจ้งเตือน
+                        # Error อื่นๆ ที่ไม่เกี่ยวกับการปิดออเดอร์ ให้แจ้งเตือนปกติ
                         await telegram.send(f"⚠️ <b>API Error:</b> {err}")
                         if bot_state["active_trade"] and bot_state["contract_id"] is None:
                             await update_state({"active_trade": False, "signal_type": ""})
