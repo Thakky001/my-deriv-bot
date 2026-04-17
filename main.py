@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 from collections import deque
 import websockets
+import itertools
 from deriv_ws import DerivWS
 from telegram_bot import TelegramAlert
 from database import SupabaseDB
@@ -24,8 +25,8 @@ candles_15m = deque(maxlen=300)
 
 TH_TZ = timezone(timedelta(hours=7))
 
-# [Fix 6] ใช้ Global Counter ป้องกัน req_id ชนกันตอน reconnect เร็วๆ
-global_req_counter = 1
+# [Fix 2] ใช้ itertools.count() การันตี Atomic & Thread-safe หมดปัญหา req_id ชนกันตอน reconnect ซ้อน
+global_req_counter = itertools.count(1)
 
 bot_state = {
     "active_trade": False, 
@@ -38,14 +39,19 @@ bot_state = {
     "total_profit": 0.0,
     "win_count": 0,
     "loss_count": 0
-    # ถอด daily_stats แบบ JSONB ออกจาก State หลักแล้ว
 }
 
 # จัดการข้อมูลชั่วคราวใน Memory
 local_mem = {
     "last_sell_time": 0,
     "sell_triggered": False,
-    "is_processing_close": False # [Fix 1] Flag ป้องกัน Double-count profit
+    "is_processing_close": False 
+}
+
+# [Fix 8] ระบบ Cache สำหรับ Dashboard ป้องกัน API Quota Limit
+dashboard_cache = {
+    "data": {},
+    "last_updated": 0
 }
 
 async def update_state(payload: dict):
@@ -72,14 +78,21 @@ async def ping():
 @app.get("/", response_class=HTMLResponse)
 async def root(): 
     """ หน้า Dashboard เช็คผลประกอบการรายวันและรายเดือน (มีระบบ Tab) """
+    # [Fix 8] โหลดข้อมูลใหม่เฉพาะตอนเริ่มระบบ หรือเมื่อ Cache หมดอายุ (5 นาที)
+    current_time = time.time()
+    if dashboard_cache["last_updated"] == 0 or (current_time - dashboard_cache["last_updated"] > 300):
+        fetched_data = await db.get_all_daily_history()
+        if fetched_data is not None:
+            dashboard_cache["data"] = fetched_data
+            dashboard_cache["last_updated"] = current_time
+
     wins = bot_state.get("win_count", 0)
     losses = bot_state.get("loss_count", 0)
     total_trades = wins + losses
     profit = bot_state.get("total_profit", 0.0)
     win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
     
-    # ดึงสถิติรายวันจากตาราง daily_history แทน State 
-    daily_stats = await db.get_all_daily_history()
+    daily_stats = dashboard_cache["data"]
     monthly_stats = {}
     daily_rows_html = ""
     monthly_rows_html = ""
@@ -252,7 +265,6 @@ async def sync_portfolio_state(msg):
         
         if bot_state["active_trade"]:
             if bot_state["contract_id"] not in active_ids:
-                # [Fix 3] ยิงขอดูสถิติไม้ที่ปิดไปแล้วตอนบอทหลับ เพื่อดึงกำไรมาคำนวณ แทนที่จะทิ้งไปฟรีๆ
                 await deriv.send({
                     "proposal_open_contract": 1, 
                     "contract_id": bot_state["contract_id"]
@@ -286,7 +298,6 @@ async def active_trade_manager(msg):
             await update_state({"entry_price": entry_spot})
 
         if is_sold:
-            # [Fix 1] เช็ค Flag ป้องกันการรับค่า is_sold ซ้ำหลายรอบ (Double-count)
             if local_mem.get("is_processing_close"): 
                 return
             local_mem["is_processing_close"] = True
@@ -303,6 +314,14 @@ async def active_trade_manager(msg):
                 # บันทึกประวัติรายวันลงตาราง Time-series และดึงยอดกำไรรวมของวันนี้กลับมา
                 today_profit = await db.update_daily_record(today_str, profit, w, l)
 
+                # [Fix 8] อัปเดต Cache แบบ Real-time เพื่อให้หน้าเว็บเปลี่ยนทันทีไม่ต้องรอ 5 นาที
+                if dashboard_cache["last_updated"] != 0:
+                    if today_str not in dashboard_cache["data"]:
+                        dashboard_cache["data"][today_str] = {"profit": 0.0, "wins": 0, "losses": 0}
+                    dashboard_cache["data"][today_str]["profit"] = today_profit
+                    dashboard_cache["data"][today_str]["wins"] += w
+                    dashboard_cache["data"][today_str]["losses"] += l
+
                 await update_state({
                     "active_trade": False, "contract_id": None, 
                     "total_profit": new_profit, "win_count": wins, "loss_count": losses,
@@ -314,16 +333,13 @@ async def active_trade_manager(msg):
                 
                 await deriv.send({"forget_all": "proposal_open_contract"})
             finally:
-                # สำคัญ: ต้องปลดล็อค Flag เสมอหลังทำงานเสร็จ หรือเกิด Error
                 local_mem["is_processing_close"] = False
             return
 
 async def request_history():
-    global global_req_counter
-    # [Fix 6] ใช้ global counter เพื่อรับประกันว่า Req ID จะไม่มีทางชนกัน
-    req_1m = global_req_counter
-    req_15m = global_req_counter + 1
-    global_req_counter += 2
+    # [Fix 2] ใช้ next() สร้าง id ที่เป็นเอกลักษณ์ ป้องกัน id ชน 100%
+    req_1m = next(global_req_counter)
+    req_15m = next(global_req_counter)
     
     await deriv.send({"ticks_history": SYMBOL, "end": "latest", "count": 300, "granularity": 60, "style": "candles", "req_id": req_1m, "subscribe": 1})
     await deriv.send({"ticks_history": SYMBOL, "end": "latest", "count": 300, "granularity": 900, "style": "candles", "req_id": req_15m, "subscribe": 1})
@@ -336,6 +352,10 @@ async def trading_loop():
     while True:
         try:
             await deriv.connect()
+            
+            # [Fix 3] เคลียร์สถานะใน Memory ทันทีที่เชื่อมต่อใหม่ ป้องกันบอทค้างไม่ยอมออกออเดอร์
+            local_mem["sell_triggered"] = False
+            local_mem["is_processing_close"] = False
             
             await deriv.send({"portfolio": 1})
             for _ in range(5): 
@@ -422,7 +442,6 @@ async def trading_loop():
                                         last_processed_time = last_candle['time']
                                         
                                         try:
-                                            # [Fix 5] ใช้ tuple() เพื่อ Snapshot ข้อมูลให้ Thread-safe ก่อนส่งให้ Thread แยก
                                             df_1m = pd.DataFrame(tuple(candles_1m))
                                             df_15m = pd.DataFrame(tuple(candles_15m))
                                             
