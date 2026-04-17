@@ -310,9 +310,12 @@ async def active_trade_manager(msg):
         # ตรวจสอบว่า ID ตรงกับที่เราถืออยู่หรือไม่
         if bot_state["contract_id"] != c_id: return
 
-        profit = float(contract.get("profit", 0))
-        is_sold = bool(contract.get("is_sold", False))
-        entry_spot = float(contract.get("entry_spot", 0))
+        # 👇 [แก้ไข 1] ใส่ or 0.0 เพื่อป้องกันกรณี Deriv ส่งค่า null มาแล้วทำให้บอทค้าง
+        profit = float(contract.get("profit") or 0.0)
+        entry_spot = float(contract.get("entry_spot") or 0.0)
+
+        # 👇 [แก้ไข 2] เพิ่มเช็ค status == "sold" (บางที Deriv ไม่ส่ง is_sold มา)
+        is_sold = bool(contract.get("is_sold", False)) or contract.get("status") == "sold"
 
         if entry_spot and bot_state["entry_price"] == 0:
             await update_state({"entry_price": entry_spot})
@@ -442,49 +445,58 @@ async def trading_loop():
                         if open_time == last_candle['time']:
                             for k in ['close', 'high', 'low']: last_candle[k] = float(ohlc[k])
                         elif open_time > last_candle['time']:
-                            if granularity == 60 and not bot_state["active_trade"] and len(candles_15m) > 0:
-                                if last_processed_time != last_candle['time']:
-                                    last_processed_time = last_candle['time']
+                            
+                            # 👇 [แก้ไขเพิ่ม] แยกเงื่อนไขการทำงานในทุกๆ 1 นาที
+                            if granularity == 60:
+                                
+                                # ระบบ Heartbeat: ถ้าถือออเดอร์อยู่ ให้กระตุ้นถามสถานะเผื่อ Stream หลุด
+                                if bot_state["active_trade"] and bot_state["contract_id"]:
+                                    await deriv.send({"proposal_open_contract": 1, "contract_id": bot_state["contract_id"]})
                                     
-                                    try:
-                                        df_1m = pd.DataFrame(list(candles_1m))
-                                        df_15m = pd.DataFrame(list(candles_15m))
+                                # ระบบวิเคราะห์กราฟ: ทำงานเฉพาะตอนที่ 'ไม่ได้ถือออเดอร์'
+                                if not bot_state["active_trade"] and len(candles_15m) > 0:
+                                    if last_processed_time != last_candle['time']:
+                                        last_processed_time = last_candle['time']
                                         
-                                        signal, sl_dist, tp_dist = await asyncio.wait_for(
-                                            asyncio.to_thread(strategy.analyze, df_1m, df_15m), 
-                                            timeout=5.0
-                                        )
-                                        
-                                        if signal:
-                                            curr_price = last_candle['close']
-                                            sl_price = curr_price - sl_dist if signal == 'BUY' else curr_price + sl_dist
-                                            tp_price = curr_price + tp_dist if signal == 'BUY' else curr_price - tp_dist
+                                        try:
+                                            df_1m = pd.DataFrame(list(candles_1m))
+                                            df_15m = pd.DataFrame(list(candles_15m))
                                             
-                                            stake = 10 
-                                            mult = 100
-                                            sl_amount = round((sl_dist / curr_price) * mult * stake, 2)
-                                            tp_amount = round((tp_dist / curr_price) * mult * stake, 2)
-
-                                            max_sl = stake * 0.95
-                                            if sl_amount > max_sl: sl_amount = max_sl
-
-                                            await update_state({
-                                                "signal_type": signal, "sl": sl_price, "tp": tp_price, 
-                                                "active_trade": True, "is_breakeven": False, "entry_price": 0
-                                            })
+                                            signal, sl_dist, tp_dist = await asyncio.wait_for(
+                                                asyncio.to_thread(strategy.analyze, df_1m, df_15m), 
+                                                timeout=5.0
+                                            )
                                             
-                                            await deriv.send({
-                                                "buy": 1, "price": stake,
-                                                "parameters": {
-                                                    "amount": stake, "basis": "stake", "symbol": SYMBOL, "currency": "USD", "multiplier": mult,
-                                                    "contract_type": "MULTUP" if signal == 'BUY' else "MULTDOWN",
-                                                    "limit_order": {"stop_loss": sl_amount, "take_profit": tp_amount}
-                                                }
-                                            })
-                                    except asyncio.TimeoutError:
-                                        await telegram.send("⏱️ <b>Analyzer Timeout:</b> ข้ามแท่งนี้")
-                                    except Exception as calc_err:
-                                        print(f"Indicator Error: {calc_err}")
+                                            if signal:
+                                                curr_price = last_candle['close']
+                                                sl_price = curr_price - sl_dist if signal == 'BUY' else curr_price + sl_dist
+                                                tp_price = curr_price + tp_dist if signal == 'BUY' else curr_price - tp_dist
+                                                
+                                                stake = 10 
+                                                mult = 100
+                                                sl_amount = round((sl_dist / curr_price) * mult * stake, 2)
+                                                tp_amount = round((tp_dist / curr_price) * mult * stake, 2)
+
+                                                max_sl = stake * 0.95
+                                                if sl_amount > max_sl: sl_amount = max_sl
+
+                                                await update_state({
+                                                    "signal_type": signal, "sl": sl_price, "tp": tp_price, 
+                                                    "active_trade": True, "is_breakeven": False, "entry_price": 0
+                                                })
+                                                
+                                                await deriv.send({
+                                                    "buy": 1, "price": stake,
+                                                    "parameters": {
+                                                        "amount": stake, "basis": "stake", "symbol": SYMBOL, "currency": "USD", "multiplier": mult,
+                                                        "contract_type": "MULTUP" if signal == 'BUY' else "MULTDOWN",
+                                                        "limit_order": {"stop_loss": sl_amount, "take_profit": tp_amount}
+                                                    }
+                                                })
+                                        except asyncio.TimeoutError:
+                                            await telegram.send("⏱️ <b>Analyzer Timeout:</b> ข้ามแท่งนี้")
+                                        except Exception as calc_err:
+                                            print(f"Indicator Error: {calc_err}")
                             
                             target_deque.append({"time": open_time, "open": float(ohlc['open']), "high": float(ohlc['high']), "low": float(ohlc['low']), "close": float(ohlc['close'])})
 
