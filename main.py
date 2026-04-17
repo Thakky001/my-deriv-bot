@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 from collections import deque
 import websockets
@@ -21,6 +21,8 @@ strategy = Strategy()
 # Deque สำหรับเก็บข้อมูลกราฟ
 candles_1m = deque(maxlen=300)
 candles_15m = deque(maxlen=300)
+
+TH_TZ = timezone(timedelta(hours=7))
 
 bot_state = {
     "active_trade": False, 
@@ -321,7 +323,7 @@ async def active_trade_manager(msg):
             wins = bot_state.get("win_count", 0) + (1 if profit > 0 else 0)
             losses = bot_state.get("loss_count", 0) + (1 if profit <= 0 else 0)
 
-            today_str = datetime.now().strftime("%Y-%m-%d")
+            today_str = datetime.now(TH_TZ).strftime("%Y-%m-%d")
             daily_stats = bot_state.get("daily_stats", {})
             if today_str not in daily_stats:
                 daily_stats[today_str] = {"profit": 0.0, "wins": 0, "losses": 0}
