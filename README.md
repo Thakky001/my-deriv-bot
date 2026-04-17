@@ -52,47 +52,89 @@
 
 คุณจะเห็นหัวข้อ Project URL ให้ก๊อปปี้ URL มาจดไว้ (นี่คือ SUPABASE_URL)
 
-ในหน้าเดียวกัน หัวข้อ Project API keys ให้ก๊อปปี้ Key ที่เขียนว่า anon public มาจดไว้ (นี่คือ SUPABASE_KEY)
+ในหน้าเดียวกัน หัวข้อ Project API keys เลื่อนลงมาล่างสุดที่หัวข้อ Secret keys ให้ก๊อปปี้ Key ลับของคุณมา (นี่คือ SUPABASE_KEY สำหรับให้บอทเขียนฐานข้อมูล)
 
 ## ขั้นตอนที่ 2: การสร้างตารางฐานข้อมูลใน Supabase
 
-ขั้นตอนนี้สำคัญมาก หากไม่ทำ บอทจะเปิดไม่ขึ้นหรือเกิด Error
+ขั้นตอนนี้สำคัญมาก บอทเวอร์ชัน Time-series จะใช้ 2 ตารางร่วมกัน
 
-ในหน้าต่างโปรเจกต์ Supabase ของคุณ ให้เลือกเมนู Table Editor (ไอคอนรูปตารางด้านซ้าย)
+**ตารางที่ 1: สำหรับสถานะบอท (bot_state)**
 
-กดปุ่ม Create a new table
+1. ในโปรเจกต์ Supabase เลือกเมนู Table Editor (ไอคอนรูปตารางด้านซ้าย)
+2. กดปุ่ม Create a new table
+3. ตั้งชื่อ Name ว่า bot_state
+4. ปิด Enable Row Level Security (RLS) (เอาเครื่องหมายติ๊กถูกออก)
+5. ในหัวข้อ Columns ระบบจะสร้าง id มาให้แล้ว ให้กด Add column เพิ่ม:
 
-ตั้งชื่อ Name ว่า bot_state
+- คอลัมน์ active_trade เลือก Type เป็น bool (ค่าเริ่มต้น = FALSE)
+- คอลัมน์ contract_id เลือก Type เป็น int8 (ปล่อยว่าง)
+- คอลัมน์ entry_price เลือก Type เป็น float8 (ค่าเริ่มต้น = 0)
+- คอลัมน์ sl เลือก Type เป็น float8 (ค่าเริ่มต้น = 0)
+- คอลัมน์ tp เลือก Type เป็น float8 (ค่าเริ่มต้น = 0)
+- คอลัมน์ is_breakeven เลือก Type เป็น bool (ค่าเริ่มต้น = FALSE)
+- คอลัมน์ signal_type เลือก Type เป็น text (ปล่อยว่าง)
+- คอลัมน์ total_profit เลือก Type เป็น float8 (ค่าเริ่มต้น = 0)
+- คอลัมน์ win_count เลือก Type เป็น int8 (ค่าเริ่มต้น = 0)
+- คอลัมน์ loss_count เลือก Type เป็น int8 (ค่าเริ่มต้น = 0)
 
-ปิดการตั้งค่า Enable Row Level Security (RLS) (เอาเครื่องหมายติ๊กถูกออก) เพื่อให้บอทอ่าน/เขียนข้อมูลได้ง่ายๆ
+6. กด Save
+7. **ขั้นตอนบังคับ:** กดปุ่ม Insert row สร้างข้อมูลแถวแรก ปล่อยทุกอย่างเป็นค่าเริ่มต้นแล้วกด Save เพื่อให้มีข้อมูลแถว `id=1` ทิ้งไว้
 
-ในหัวข้อ Columns ระบบจะสร้าง id มาให้แล้ว ให้กดปุ่ม Add column เพื่อเพิ่มคอลัมน์ดังนี้:
+**ตารางที่ 2: สำหรับเก็บสถิติรายวันแบบ Time-series (daily_history)**
 
-คอลัมน์ 1: ตั้งชื่อ active_trade เลือก Type เป็น bool (ค่าเริ่มต้น = FALSE)
+1. กดปุ่ม New table อีกครั้ง
+2. ตั้งชื่อ Name ว่า daily_history
+3. ปิด Enable Row Level Security (RLS) ด้วย
+4. ในหัวข้อ Columns ให้กด Add column เพื่อเพิ่ม:
 
-คอลัมน์ 2: ตั้งชื่อ contract_id เลือก Type เป็น int8 (ปล่อยค่า Default ว่างไว้)
+- คอลัมน์ date เลือก Type เป็น date
+- คอลัมน์ profit เลือก Type เป็น float8 (ค่าเริ่มต้น = 0)
+- คอลัมน์ win_count เลือก Type เป็น int8 (ค่าเริ่มต้น = 0)
+- คอลัมน์ loss_count เลือก Type เป็น int8 (ค่าเริ่มต้น = 0)
 
-คอลัมน์ 3: ตั้งชื่อ entry_price เลือก Type เป็น float8 (ค่าเริ่มต้น = 0)
+5. กด Save (ตารางนี้ไม่ต้องกด Insert row บอทจะสร้างของแต่ละวันขึ้นมาเองโดยอัตโนมัติ)
 
-คอลัมน์ 4: ตั้งชื่อ sl เลือก Type เป็น float8 (ค่าเริ่มต้น = 0)
+-- ====================================================================
+-- 1. สร้างตารางสถานะบอท (bot_state) (ถอด daily_stats ออกตามระบบใหม่)
+-- ====================================================================
+CREATE TABLE bot_state (
+id INT PRIMARY KEY,
+active_trade BOOLEAN DEFAULT FALSE,
+contract_id BIGINT,
+entry_price DOUBLE PRECISION DEFAULT 0.0,
+sl DOUBLE PRECISION DEFAULT 0.0,
+tp DOUBLE PRECISION DEFAULT 0.0,
+is_breakeven BOOLEAN DEFAULT FALSE,
+signal_type TEXT,
+total_profit DOUBLE PRECISION DEFAULT 0.0,
+win_count BIGINT DEFAULT 0,
+loss_count BIGINT DEFAULT 0
+);
 
-คอลัมน์ 5: ตั้งชื่อ tp เลือก Type เป็น float8 (ค่าเริ่มต้น = 0)
+-- ปิดระบบ RLS เพื่อให้บอทอ่าน/เขียนข้อมูลได้อิสระ
+ALTER TABLE bot_state DISABLE ROW LEVEL SECURITY;
 
-คอลัมน์ 6: ตั้งชื่อ is_breakeven เลือก Type เป็น bool (ค่าเริ่มต้น = FALSE)
+-- แถวบังคับ: สร้างข้อมูลตั้งต้นในแถวที่ id = 1 เพื่อให้บอทใช้อัปเดตทับ
+INSERT INTO bot_state (
+id, active_trade, contract_id, entry_price, sl, tp,
+is_breakeven, signal_type, total_profit, win_count, loss_count
+) VALUES (
+1, FALSE, NULL, 0.0, 0.0, 0.0,
+FALSE, '', 0.0, 0, 0
+);
 
-คอลัมน์ 7: ตั้งชื่อ signal_type เลือก Type เป็น text (ปล่อยค่า Default ว่างไว้)
+-- ====================================================================
+-- 2. สร้างตารางเก็บสถิติรายวันแบบ Time-series (daily_history)
+-- ====================================================================
+CREATE TABLE daily_history (
+date DATE PRIMARY KEY,
+profit DOUBLE PRECISION DEFAULT 0.0,
+win_count BIGINT DEFAULT 0,
+loss_count BIGINT DEFAULT 0
+);
 
-คอลัมน์ 8: ตั้งชื่อ total_profit เลือก Type เป็น float8 (ค่าเริ่มต้น = 0)
-
-คอลัมน์ 9: ตั้งชื่อ win_count เลือก Type เป็น int8 (ค่าเริ่มต้น = 0)
-
-คอลัมน์ 10: ตั้งชื่อ loss_count เลือก Type เป็น int8 (ค่าเริ่มต้น = 0)
-
-คอลัมน์ 11: ตั้งชื่อ daily_stats เลือก Type เป็น jsonb (ค่าเริ่มต้นให้พิมพ์วงเล็บปีกกา {} ลงไป)
-
-กดปุ่ม Save
-
-ขั้นตอนบังคับ: หลังจากสร้างตารางเสร็จ ให้กดปุ่ม Insert row เพื่อสร้างข้อมูลแถวแรก ปล่อยค่าทุกอย่างเป็นค่าเริ่มต้น แล้วกด Save (เพื่อให้ระบบมีข้อมูลแถวที่ id=1 ให้บอทวิ่งมาอัปเดตทับได้)
+-- ปิดระบบ RLS เพื่อให้บอทอ่าน/เขียนข้อมูลได้อิสระ
+ALTER TABLE daily_history DISABLE ROW LEVEL SECURITY;
 
 ## ขั้นตอนที่ 3: ติดตั้งโปรแกรมและตั้งค่าโค้ด (Local Setup)
 
@@ -110,9 +152,9 @@ pip install -r requirements.txt
 
 ข้อมูลโค้ด
 DERIV*APP_ID="12345"
-DERIV_TOKEN="token*ที่ได้จากderiv_ของคุณ"
+DERIV_TOKEN="token*ที่ได้จากderiv*ของคุณ"
 SUPABASE_URL="https://xxx.supabase.co"
-SUPABASE_KEY="eyJh...คีย์ยาวๆของsupabase"
+SUPABASE_KEY="sb_secret*คีย์ลับยาวๆของsupabase"
 TELEGRAM_TOKEN="1234:ABCDEF..."
 TELEGRAM_CHAT_ID="123456789"
 (หมายเหตุ: นำข้อความไปใส่ในเครื่องหมายคำพูดเลย โดยไม่ต้องมีช่องว่าง)
@@ -143,7 +185,7 @@ http://localhost:8000
 
 ใน Render ให้กดสร้าง New Web Service แล้วเลือก Repository ของคุณ
 
-กำหนดค่า Environment Variables: นำค่าจากไฟล์ .env ทั้งหมดไปใส่ในหมวด Environment Variables ของ Render ให้ครบ
+กำหนดค่า Environment Variables: นำค่าจากไฟล์ .env ทั้งหมดไปใส่ในหมวด Environment Variables ของ Render ให้ครบ (ห้ามใส่เครื่องหมาย "")
 
 กด Deploy และรอระบบรันโค้ด
 

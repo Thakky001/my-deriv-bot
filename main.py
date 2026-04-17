@@ -24,6 +24,9 @@ candles_15m = deque(maxlen=300)
 
 TH_TZ = timezone(timedelta(hours=7))
 
+# [Fix 6] ใช้ Global Counter ป้องกัน req_id ชนกันตอน reconnect เร็วๆ
+global_req_counter = 1
+
 bot_state = {
     "active_trade": False, 
     "contract_id": None, 
@@ -34,15 +37,15 @@ bot_state = {
     "signal_type": "",
     "total_profit": 0.0,
     "win_count": 0,
-    "loss_count": 0,
-    # เพิ่มระบบเก็บสถิติแยกรายวัน
-    "daily_stats": {} 
+    "loss_count": 0
+    # ถอด daily_stats แบบ JSONB ออกจาก State หลักแล้ว
 }
 
 # จัดการข้อมูลชั่วคราวใน Memory
 local_mem = {
     "last_sell_time": 0,
-    "sell_triggered": False 
+    "sell_triggered": False,
+    "is_processing_close": False # [Fix 1] Flag ป้องกัน Double-count profit
 }
 
 async def update_state(payload: dict):
@@ -75,19 +78,18 @@ async def root():
     profit = bot_state.get("total_profit", 0.0)
     win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
     
-    daily_stats = bot_state.get("daily_stats", {})
+    # ดึงสถิติรายวันจากตาราง daily_history แทน State 
+    daily_stats = await db.get_all_daily_history()
     monthly_stats = {}
     daily_rows_html = ""
     monthly_rows_html = ""
 
-    # เรียงวันที่จากล่าสุดไปเก่าสุด
     sorted_dates = sorted(daily_stats.keys(), reverse=True)
 
     for date_str in sorted_dates:
         day_data = daily_stats[date_str]
-        month_str = date_str[:7] # ดึงแค่ YYYY-MM
+        month_str = date_str[:7] 
         
-        # สะสมยอดรายเดือน
         if month_str not in monthly_stats:
             monthly_stats[month_str] = {"profit": 0.0, "wins": 0, "losses": 0}
         
@@ -95,13 +97,11 @@ async def root():
         monthly_stats[month_str]["wins"] += day_data["wins"]
         monthly_stats[month_str]["losses"] += day_data["losses"]
 
-        # สร้างแถวตารางรายวัน
         d_trades = day_data["wins"] + day_data["losses"]
         d_rate = (day_data["wins"] / d_trades * 100) if d_trades > 0 else 0
         d_color = "#2ecc71" if day_data["profit"] >= 0 else "#e74c3c"
         daily_rows_html += f"<tr><td>{date_str}</td><td>{d_trades}</td><td>{d_rate:.1f}%</td><td style='color:{d_color}; font-weight:bold;'>{day_data['profit']:.2f}</td></tr>"
 
-    # สร้างแถวตารางรายเดือน
     for m_str, m_data in monthly_stats.items():
         m_trades = m_data["wins"] + m_data["losses"]
         m_rate = (m_data["wins"] / m_trades * 100) if m_trades > 0 else 0
@@ -113,7 +113,6 @@ async def root():
     if not monthly_rows_html:
         monthly_rows_html = "<tr><td colspan='4' style='text-align:center;'>ยังไม่มีข้อมูล</td></tr>"
 
-    # HTML รูปแบบใหม่ที่มีระบบ Tabs
     html_content = f"""
     <html>
         <head>
@@ -131,11 +130,7 @@ async def root():
                     align-items: center; 
                 }}
                 .container {{ width: 100%; max-width: 800px; }}
-                
-                /* Header */
                 .header-title {{ text-align: center; color: #1c1e21; margin-bottom: 20px; }}
-                
-                /* Tabs Navigation */
                 .tabs {{ 
                     display: flex; 
                     justify-content: center; 
@@ -159,22 +154,15 @@ async def root():
                 }}
                 .tab-btn:hover {{ background: #f0f2f5; color: #333; }}
                 .tab-btn.active {{ background: #007bff; color: white; }}
-                
-                /* Content Cards */
                 .tab-content {{ display: none; animation: fadeIn 0.4s; }}
                 .card {{ background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }}
                 @keyframes fadeIn {{ from {{ opacity: 0; transform: translateY(10px); }} to {{ opacity: 1; transform: translateY(0); }} }}
-                
                 h2, h3 {{ color: #1c1e21; margin-top: 0; text-align: center; border-bottom: 2px solid #f0f2f5; padding-bottom: 10px; }}
-                
-                /* Grid Stats */
                 .stat-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-top: 15px; }}
                 .stat-box {{ background: #f8f9fa; padding: 20px 15px; border-radius: 8px; text-align: center; border-bottom: 3px solid #007bff; }}
                 .stat-label {{ font-size: 12px; color: #666; text-transform: uppercase; letter-spacing: 1px; }}
                 .stat-value {{ font-size: 28px; font-weight: bold; margin-top: 8px; }}
                 .profit {{ color: {'#2ecc71' if profit >= 0 else '#e74c3c'}; }}
-                
-                /* Tables */
                 .table-container {{ overflow-x: auto; }}
                 table {{ width: 100%; border-collapse: collapse; font-size: 14px; text-align: right; margin-top: 15px; }}
                 th, td {{ padding: 12px 15px; border-bottom: 1px solid #eee; }}
@@ -186,13 +174,11 @@ async def root():
         <body>
             <div class="container">
                 <h1 class="header-title">📈 Deriv Bot Dashboard</h1>
-
                 <div class="tabs">
                     <button class="tab-btn active" onclick="openTab(event, 'Overview')">ภาพรวม (Overview)</button>
                     <button class="tab-btn" onclick="openTab(event, 'Monthly')">รายเดือน (Monthly)</button>
                     <button class="tab-btn" onclick="openTab(event, 'Daily')">รายวัน (Daily)</button>
                 </div>
-
                 <div id="Overview" class="tab-content" style="display: block;">
                     <div class="card">
                         <h2>🤖 ภาพรวมพอร์ต (All-Time)</h2>
@@ -216,7 +202,6 @@ async def root():
                         </div>
                     </div>
                 </div>
-
                 <div id="Monthly" class="tab-content">
                     <div class="card">
                         <h3>📅 สรุปรายเดือน (Monthly)</h3>
@@ -228,7 +213,6 @@ async def root():
                         </div>
                     </div>
                 </div>
-
                 <div id="Daily" class="tab-content">
                     <div class="card">
                         <h3>📝 สถิติรายวัน (Daily)</h3>
@@ -240,26 +224,18 @@ async def root():
                         </div>
                     </div>
                 </div>
-
             </div>
-
             <script>
                 function openTab(evt, tabName) {{
                     var i, tabcontent, tablinks;
-                    
-                    // Hide all tab content
                     tabcontent = document.getElementsByClassName("tab-content");
                     for (i = 0; i < tabcontent.length; i++) {{
                         tabcontent[i].style.display = "none";
                     }}
-                    
-                    // Remove the active class from all buttons
                     tablinks = document.getElementsByClassName("tab-btn");
                     for (i = 0; i < tablinks.length; i++) {{
                         tablinks[i].className = tablinks[i].className.replace(" active", "");
                     }}
-                    
-                    // Show the current tab, and add an "active" class to the button that opened the tab
                     document.getElementById(tabName).style.display = "block";
                     evt.currentTarget.className += " active";
                 }}
@@ -270,24 +246,18 @@ async def root():
     return html_content
 
 async def sync_portfolio_state(msg):
-    """ ตรวจสอบสถานะพอร์ตตอนเริ่มระบบ เพื่อเคลียร์ออเดอร์ค้าง (Ghost Order) """
     if "portfolio" in msg:
         contracts = msg["portfolio"].get("contracts", [])
         active_ids = [c["contract_id"] for c in contracts]
         
         if bot_state["active_trade"]:
-            # กรณีที่ 1: ในระบบบอกว่ามีออเดอร์ แต่ในพอร์ตจริงไม่มีแล้ว (ชน TP/SL ตอนบอทปิดอยู่)
             if bot_state["contract_id"] not in active_ids:
-                await update_state({
-                    "active_trade": False, 
-                    "contract_id": None, 
-                    "signal_type": "",
-                    "entry_price": 0,
-                    "is_breakeven": False
+                # [Fix 3] ยิงขอดูสถิติไม้ที่ปิดไปแล้วตอนบอทหลับ เพื่อดึงกำไรมาคำนวณ แทนที่จะทิ้งไปฟรีๆ
+                await deriv.send({
+                    "proposal_open_contract": 1, 
+                    "contract_id": bot_state["contract_id"]
                 })
-                await telegram.send("🧹 <b>Startup Cleanup:</b> เคลียร์สถานะออเดอร์ค้างเก่าเรียบร้อย")
-            
-            # กรณีที่ 2: ออเดอร์ยังรันอยู่จริง ให้ทำการ Subscribe เพื่อติดตามผลต่อ
+                await telegram.send("🔍 <b>Sync:</b> พบออเดอร์จบไปแล้วตอนออฟไลน์ กำลังดึงสถิติกำไร...")
             else:
                 await deriv.send({
                     "proposal_open_contract": 1, 
@@ -303,55 +273,58 @@ async def active_trade_manager(msg):
 
         c_id = contract.get("contract_id")
         
-        # ถ้าเป็นสัญญาใหม่ที่เพิ่งซื้อ ให้บันทึก ID ไว้
         if bot_state["active_trade"] and bot_state["contract_id"] is None:
             await update_state({"contract_id": c_id})
             
-        # ตรวจสอบว่า ID ตรงกับที่เราถืออยู่หรือไม่
         if bot_state["contract_id"] != c_id: return
 
-        # 👇 [แก้ไข 1] ใส่ or 0.0 เพื่อป้องกันกรณี Deriv ส่งค่า null มาแล้วทำให้บอทค้าง
         profit = float(contract.get("profit") or 0.0)
         entry_spot = float(contract.get("entry_spot") or 0.0)
-
-        # 👇 [แก้ไข 2] เพิ่มเช็ค status == "sold" (บางที Deriv ไม่ส่ง is_sold มา)
         is_sold = bool(contract.get("is_sold", False)) or contract.get("status") == "sold"
 
         if entry_spot and bot_state["entry_price"] == 0:
             await update_state({"entry_price": entry_spot})
 
         if is_sold:
-            # บันทึกสถิติ (โค้ดส่วนนี้สำคัญมาก)
-            new_profit = bot_state.get("total_profit", 0.0) + profit
-            wins = bot_state.get("win_count", 0) + (1 if profit > 0 else 0)
-            losses = bot_state.get("loss_count", 0) + (1 if profit <= 0 else 0)
+            # [Fix 1] เช็ค Flag ป้องกันการรับค่า is_sold ซ้ำหลายรอบ (Double-count)
+            if local_mem.get("is_processing_close"): 
+                return
+            local_mem["is_processing_close"] = True
 
-            today_str = datetime.now(TH_TZ).strftime("%Y-%m-%d")
-            daily_stats = bot_state.get("daily_stats", {})
-            if today_str not in daily_stats:
-                daily_stats[today_str] = {"profit": 0.0, "wins": 0, "losses": 0}
-            
-            daily_stats[today_str]["profit"] += profit
-            daily_stats[today_str]["wins"] += (1 if profit > 0 else 0)
-            daily_stats[today_str]["losses"] += (1 if profit <= 0 else 0)
+            try:
+                new_profit = bot_state.get("total_profit", 0.0) + profit
+                wins = bot_state.get("win_count", 0) + (1 if profit > 0 else 0)
+                losses = bot_state.get("loss_count", 0) + (1 if profit <= 0 else 0)
 
-            # อัปเดต DB และแจ้งเตือน Telegram
-            await update_state({
-                "active_trade": False, "contract_id": None, 
-                "total_profit": new_profit, "win_count": wins, "loss_count": losses,
-                "daily_stats": daily_stats, "is_breakeven": False, "signal_type": ""
-            })
-            
-            emoji = "🟢" if profit > 0 else "🔴"
-            await telegram.send(f"{emoji} <b>Trade Closed!</b>\nProfit: {profit:.2f} USD\n📅 Today: {daily_stats[today_str]['profit']:.2f} USD")
-            
-            # ล้าง Subscription
-            await deriv.send({"forget_all": "proposal_open_contract"})
+                today_str = datetime.now(TH_TZ).strftime("%Y-%m-%d")
+                w = 1 if profit > 0 else 0
+                l = 1 if profit <= 0 else 0
+                
+                # บันทึกประวัติรายวันลงตาราง Time-series และดึงยอดกำไรรวมของวันนี้กลับมา
+                today_profit = await db.update_daily_record(today_str, profit, w, l)
+
+                await update_state({
+                    "active_trade": False, "contract_id": None, 
+                    "total_profit": new_profit, "win_count": wins, "loss_count": losses,
+                    "is_breakeven": False, "signal_type": ""
+                })
+                
+                emoji = "🟢" if profit > 0 else "🔴"
+                await telegram.send(f"{emoji} <b>Trade Closed!</b>\nProfit: {profit:.2f} USD\n📅 Today: {today_profit:.2f} USD")
+                
+                await deriv.send({"forget_all": "proposal_open_contract"})
+            finally:
+                # สำคัญ: ต้องปลดล็อค Flag เสมอหลังทำงานเสร็จ หรือเกิด Error
+                local_mem["is_processing_close"] = False
             return
 
 async def request_history():
-    req_1m = int(time.time() * 1000) % 10000 
-    req_15m = req_1m + 1
+    global global_req_counter
+    # [Fix 6] ใช้ global counter เพื่อรับประกันว่า Req ID จะไม่มีทางชนกัน
+    req_1m = global_req_counter
+    req_15m = global_req_counter + 1
+    global_req_counter += 2
+    
     await deriv.send({"ticks_history": SYMBOL, "end": "latest", "count": 300, "granularity": 60, "style": "candles", "req_id": req_1m, "subscribe": 1})
     await deriv.send({"ticks_history": SYMBOL, "end": "latest", "count": 300, "granularity": 900, "style": "candles", "req_id": req_15m, "subscribe": 1})
     return req_1m, req_15m
@@ -364,14 +337,12 @@ async def trading_loop():
         try:
             await deriv.connect()
             
-            # --- [จุดที่แก้ไข 1] เช็คพอร์ตครั้งเดียวตอนเชื่อมต่อสำเร็จ ---
             await deriv.send({"portfolio": 1})
-            for _ in range(5): # ลองเช็ค 5 ข้อความแรก
+            for _ in range(5): 
                 init_msg = await deriv.receive()
                 if init_msg and "portfolio" in init_msg:
                     await sync_portfolio_state(init_msg)
                     break
-            # -----------------------------------------------------
 
             req_1m, req_15m = await request_history()
 
@@ -385,11 +356,7 @@ async def trading_loop():
 
                 if not msg: continue
                 
-                # --- [จุดที่แก้ไข 2] ลบบรรทัดเดิมที่เคยเรียก sync_portfolio_state(msg) ตรงนี้ออก ---
-                # เพื่อป้องกันไม่ให้มันไปลบข้อมูล active_trade ก่อนที่ manager จะคำนวณกำไรเสร็จ
-                
                 if "error" in msg:
-                    # ... (โค้ดจัดการ Error ส่วนเดิมของคุณ) ...
                     err = msg['error'].get('message', 'Unknown')
                     err_lower = err.lower()
                     force_reset_keywords = ["process your trade", "invalid contract", "sold", "expired"]
@@ -415,7 +382,6 @@ async def trading_loop():
                     await deriv.send({"proposal_open_contract": 1, "contract_id": c_id, "subscribe": 1})
                     await telegram.send(f"✅ <b>Order Placed:</b> {c_id}")
                 
-                # ให้ฟังก์ชันนี้เป็นคนรับผิดชอบเรื่องการบันทึกกำไรและการปิดออเดอร์แต่เพียงผู้เดียว
                 await active_trade_manager(msg)
 
                 if "candles" in msg:
@@ -446,21 +412,19 @@ async def trading_loop():
                             for k in ['close', 'high', 'low']: last_candle[k] = float(ohlc[k])
                         elif open_time > last_candle['time']:
                             
-                            # 👇 [แก้ไขเพิ่ม] แยกเงื่อนไขการทำงานในทุกๆ 1 นาที
                             if granularity == 60:
                                 
-                                # ระบบ Heartbeat: ถ้าถือออเดอร์อยู่ ให้กระตุ้นถามสถานะเผื่อ Stream หลุด
                                 if bot_state["active_trade"] and bot_state["contract_id"]:
                                     await deriv.send({"proposal_open_contract": 1, "contract_id": bot_state["contract_id"]})
                                     
-                                # ระบบวิเคราะห์กราฟ: ทำงานเฉพาะตอนที่ 'ไม่ได้ถือออเดอร์'
                                 if not bot_state["active_trade"] and len(candles_15m) > 0:
                                     if last_processed_time != last_candle['time']:
                                         last_processed_time = last_candle['time']
                                         
                                         try:
-                                            df_1m = pd.DataFrame(list(candles_1m))
-                                            df_15m = pd.DataFrame(list(candles_15m))
+                                            # [Fix 5] ใช้ tuple() เพื่อ Snapshot ข้อมูลให้ Thread-safe ก่อนส่งให้ Thread แยก
+                                            df_1m = pd.DataFrame(tuple(candles_1m))
+                                            df_15m = pd.DataFrame(tuple(candles_15m))
                                             
                                             signal, sl_dist, tp_dist = await asyncio.wait_for(
                                                 asyncio.to_thread(strategy.analyze, df_1m, df_15m), 
