@@ -60,7 +60,7 @@ async def update_state(payload: dict):
 
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(telegram.start_worker())
+    telegram.worker_task = asyncio.create_task(telegram.start_worker())
     
     saved_state = await db.get_state()
     if saved_state:
@@ -69,6 +69,20 @@ async def startup_event():
         await telegram.send(f"🔄 <b>System Booted:</b> โหลด State สำเร็จ")
     
     asyncio.create_task(trading_loop())
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    print("🛑 กำลังเข้าสู่กระบวนการปิดระบบอย่างปลอดภัย (Graceful Shutdown)...")
+    await telegram.send("🛑 <b>System:</b> เซิร์ฟเวอร์กำลังถูกปิดการทำงาน...")
+    await asyncio.sleep(2) # รอให้ข้อความสุดท้ายส่งออกไป
+    
+    await db.close()
+    await telegram.close()
+    
+    if deriv.ws:
+        await deriv.ws.close()
+        print("🔒 [Deriv WS] Connection closed.")
+    print("✅ ปิดระบบสมบูรณ์")
 
 @app.get("/ping")
 @app.head("/ping")  

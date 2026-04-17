@@ -22,6 +22,11 @@ class SupabaseDB:
             self.session = aiohttp.ClientSession(headers=self.headers)
         return self.session
 
+    async def close(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
+            print("🔒 [Database] Session closed properly.")
+
     async def get_state(self):
         try:
             session = await self.get_session()
