@@ -66,7 +66,7 @@ async def ping():
 
 @app.get("/", response_class=HTMLResponse)
 async def root(): 
-    """ หน้า Dashboard เช็คผลประกอบการรายวันและรายเดือน """
+    """ หน้า Dashboard เช็คผลประกอบการรายวันและรายเดือน (มีระบบ Tab) """
     wins = bot_state.get("win_count", 0)
     losses = bot_state.get("loss_count", 0)
     total_trades = wins + losses
@@ -111,67 +111,157 @@ async def root():
     if not monthly_rows_html:
         monthly_rows_html = "<tr><td colspan='4' style='text-align:center;'>ยังไม่มีข้อมูล</td></tr>"
 
+    # HTML รูปแบบใหม่ที่มีระบบ Tabs
     html_content = f"""
     <html>
         <head>
             <title>Deriv Bot Dashboard</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
-                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f0f2f5; color: #333; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }}
-                .container {{ width: 100%; max-width: 600px; }}
-                .card {{ background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); margin-bottom: 20px; }}
-                h2, h3 {{ color: #1c1e21; margin-top: 0; text-align: center; }}
-                .stat-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 10px; }}
-                .stat-box {{ background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; }}
+                body {{ 
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                    background-color: #f0f2f5; 
+                    color: #333; 
+                    margin: 0; 
+                    padding: 20px; 
+                    display: flex; 
+                    flex-direction: column; 
+                    align-items: center; 
+                }}
+                .container {{ width: 100%; max-width: 800px; }}
+                
+                /* Header */
+                .header-title {{ text-align: center; color: #1c1e21; margin-bottom: 20px; }}
+                
+                /* Tabs Navigation */
+                .tabs {{ 
+                    display: flex; 
+                    justify-content: center; 
+                    gap: 10px; 
+                    margin-bottom: 20px; 
+                    background: white;
+                    padding: 10px;
+                    border-radius: 12px;
+                    box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+                }}
+                .tab-btn {{
+                    background: none;
+                    border: none;
+                    padding: 10px 20px;
+                    font-size: 16px;
+                    font-weight: bold;
+                    color: #666;
+                    cursor: pointer;
+                    border-radius: 8px;
+                    transition: all 0.3s ease;
+                }}
+                .tab-btn:hover {{ background: #f0f2f5; color: #333; }}
+                .tab-btn.active {{ background: #007bff; color: white; }}
+                
+                /* Content Cards */
+                .tab-content {{ display: none; animation: fadeIn 0.4s; }}
+                .card {{ background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }}
+                @keyframes fadeIn {{ from {{ opacity: 0; transform: translateY(10px); }} to {{ opacity: 1; transform: translateY(0); }} }}
+                
+                h2, h3 {{ color: #1c1e21; margin-top: 0; text-align: center; border-bottom: 2px solid #f0f2f5; padding-bottom: 10px; }}
+                
+                /* Grid Stats */
+                .stat-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-top: 15px; }}
+                .stat-box {{ background: #f8f9fa; padding: 20px 15px; border-radius: 8px; text-align: center; border-bottom: 3px solid #007bff; }}
                 .stat-label {{ font-size: 12px; color: #666; text-transform: uppercase; letter-spacing: 1px; }}
-                .stat-value {{ font-size: 24px; font-weight: bold; margin-top: 5px; }}
+                .stat-value {{ font-size: 28px; font-weight: bold; margin-top: 8px; }}
                 .profit {{ color: {'#2ecc71' if profit >= 0 else '#e74c3c'}; }}
-                table {{ width: 100%; border-collapse: collapse; font-size: 14px; text-align: right; }}
-                th, td {{ padding: 10px; border-bottom: 1px solid #eee; }}
-                th {{ text-align: right; color: #666; font-weight: normal; font-size: 12px; text-transform: uppercase; }}
+                
+                /* Tables */
+                .table-container {{ overflow-x: auto; }}
+                table {{ width: 100%; border-collapse: collapse; font-size: 14px; text-align: right; margin-top: 15px; }}
+                th, td {{ padding: 12px 15px; border-bottom: 1px solid #eee; }}
+                th {{ text-align: right; color: #666; font-weight: bold; font-size: 13px; text-transform: uppercase; background: #f8f9fa; }}
                 th:first-child, td:first-child {{ text-align: left; }}
+                tr:hover {{ background-color: #f8f9fa; }}
             </style>
         </head>
         <body>
             <div class="container">
-                <div class="card">
-                    <h2>🤖 ภาพรวมพอร์ต (All-Time)</h2>
-                    <div class="stat-grid">
-                        <div class="stat-box">
-                            <div class="stat-label">กำไรรวม (USD)</div>
-                            <div class="stat-value profit">{profit:.2f}</div>
-                        </div>
-                        <div class="stat-box">
-                            <div class="stat-label">อัตราชนะ (Win Rate)</div>
-                            <div class="stat-value">{win_rate:.1f}%</div>
-                        </div>
-                        <div class="stat-box">
-                            <div class="stat-label">เทรดทั้งหมด</div>
-                            <div class="stat-value">{total_trades}</div>
-                        </div>
-                        <div class="stat-box">
-                            <div class="stat-label">ชนะ / แพ้</div>
-                            <div class="stat-value"><span style="color:#2ecc71">{wins}</span> / <span style="color:#e74c3c">{losses}</span></div>
+                <h1 class="header-title">📈 Deriv Bot Dashboard</h1>
+
+                <div class="tabs">
+                    <button class="tab-btn active" onclick="openTab(event, 'Overview')">ภาพรวม (Overview)</button>
+                    <button class="tab-btn" onclick="openTab(event, 'Monthly')">รายเดือน (Monthly)</button>
+                    <button class="tab-btn" onclick="openTab(event, 'Daily')">รายวัน (Daily)</button>
+                </div>
+
+                <div id="Overview" class="tab-content" style="display: block;">
+                    <div class="card">
+                        <h2>🤖 ภาพรวมพอร์ต (All-Time)</h2>
+                        <div class="stat-grid">
+                            <div class="stat-box">
+                                <div class="stat-label">กำไรรวม (USD)</div>
+                                <div class="stat-value profit">{profit:.2f}</div>
+                            </div>
+                            <div class="stat-box">
+                                <div class="stat-label">อัตราชนะ (Win Rate)</div>
+                                <div class="stat-value">{win_rate:.1f}%</div>
+                            </div>
+                            <div class="stat-box">
+                                <div class="stat-label">เทรดทั้งหมด</div>
+                                <div class="stat-value">{total_trades}</div>
+                            </div>
+                            <div class="stat-box">
+                                <div class="stat-label">ชนะ / แพ้</div>
+                                <div class="stat-value"><span style="color:#2ecc71">{wins}</span> / <span style="color:#e74c3c">{losses}</span></div>
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                <div class="card">
-                    <h3>📅 สรุปรายเดือน (Monthly)</h3>
-                    <table>
-                        <tr><th>เดือน</th><th>จำนวนเทรด</th><th>Win Rate</th><th>กำไร</th></tr>
-                        {monthly_rows_html}
-                    </table>
+                <div id="Monthly" class="tab-content">
+                    <div class="card">
+                        <h3>📅 สรุปรายเดือน (Monthly)</h3>
+                        <div class="table-container">
+                            <table>
+                                <tr><th>เดือน</th><th>จำนวนเทรด</th><th>Win Rate</th><th>กำไร</th></tr>
+                                {monthly_rows_html}
+                            </table>
+                        </div>
+                    </div>
                 </div>
 
-                <div class="card">
-                    <h3>📝 สถิติรายวัน (Daily)</h3>
-                    <table>
-                        <tr><th>วันที่</th><th>จำนวนเทรด</th><th>Win Rate</th><th>กำไร</th></tr>
-                        {daily_rows_html}
-                    </table>
+                <div id="Daily" class="tab-content">
+                    <div class="card">
+                        <h3>📝 สถิติรายวัน (Daily)</h3>
+                        <div class="table-container">
+                            <table>
+                                <tr><th>วันที่</th><th>จำนวนเทรด</th><th>Win Rate</th><th>กำไร</th></tr>
+                                {daily_rows_html}
+                            </table>
+                        </div>
+                    </div>
                 </div>
+
             </div>
+
+            <script>
+                function openTab(evt, tabName) {{
+                    var i, tabcontent, tablinks;
+                    
+                    // Hide all tab content
+                    tabcontent = document.getElementsByClassName("tab-content");
+                    for (i = 0; i < tabcontent.length; i++) {{
+                        tabcontent[i].style.display = "none";
+                    }}
+                    
+                    // Remove the active class from all buttons
+                    tablinks = document.getElementsByClassName("tab-btn");
+                    for (i = 0; i < tablinks.length; i++) {{
+                        tablinks[i].className = tablinks[i].className.replace(" active", "");
+                    }}
+                    
+                    // Show the current tab, and add an "active" class to the button that opened the tab
+                    document.getElementById(tabName).style.display = "block";
+                    evt.currentTarget.className += " active";
+                }}
+            </script>
         </body>
     </html>
     """
