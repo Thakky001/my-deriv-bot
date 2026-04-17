@@ -366,8 +366,6 @@ async def trading_loop():
                 if init_msg and "portfolio" in init_msg:
                     await sync_portfolio_state(init_msg)
                     break
-            if init_msg and "portfolio" in init_msg:
-                await sync_portfolio_state(init_msg)
             # -----------------------------------------------------
 
             req_1m, req_15m = await request_history()
