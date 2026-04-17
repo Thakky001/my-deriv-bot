@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 import asyncio
 import time
 import pandas as pd
@@ -8,7 +9,7 @@ from deriv_ws import DerivWS
 from telegram_bot import TelegramAlert
 from database import SupabaseDB
 from indicators import Strategy
-from config import SYMBOL, RISK_PERCENT  # (Fix 8) ดึง Risk มาใช้
+from config import SYMBOL, RISK_PERCENT
 
 app = FastAPI()
 telegram = TelegramAlert()
@@ -16,7 +17,7 @@ db = SupabaseDB()
 deriv = DerivWS(telegram)
 strategy = Strategy()
 
-# (Fix 2) ย้าย Deque มาเป็น Global เพื่อไม่ให้หายตอน Reconnect
+# (Fix 2) Deque สำหรับเก็บข้อมูลกราฟ
 candles_1m = deque(maxlen=300)
 candles_15m = deque(maxlen=300)
 
@@ -27,13 +28,17 @@ bot_state = {
     "sl": 0, 
     "tp": 0, 
     "is_breakeven": False, 
-    "signal_type": ""
+    "signal_type": "",
+    # ระบบเก็บสถิติผลประกอบการ
+    "total_profit": 0.0,
+    "win_count": 0,
+    "loss_count": 0
 }
 
-# (Fix 3) แยก last_sell_time ออกมาจัดการใน Memory ล้วนๆ ไม่ยุ่งกับ DB State
+# (Fix 3) จัดการข้อมูลชั่วคราวใน Memory
 local_mem = {
     "last_sell_time": 0,
-    "sell_triggered": False # (Fix 6) กัน Telegram Alert Flood
+    "sell_triggered": False 
 }
 
 async def update_state(payload: dict):
@@ -57,24 +62,55 @@ async def startup_event():
 async def ping(): 
     return {"status": "alive"}
 
-@app.get("/")
-@app.head("/")  
+@app.get("/", response_class=HTMLResponse)
 async def root(): 
-    return {"status": "Deriv Bot API is running!"}
+    """ หน้า Dashboard เช็คผลประกอบการแบบ Real-time """
+    wins = bot_state.get("win_count", 0)
+    losses = bot_state.get("loss_count", 0)
+    total_trades = wins + losses
+    profit = bot_state.get("total_profit", 0.0)
+    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+    
+    html_content = f"""
+    <html>
+        <head>
+            <title>Deriv Bot Dashboard</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                body {{ font-family: sans-serif; background-color: #f0f2f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }}
+                .card {{ background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); width: 90%; max-width: 400px; text-align: center; }}
+                h2 {{ color: #1c1e21; margin-bottom: 1.5rem; }}
+                .stat {{ display: flex; justify-content: space-between; padding: 0.8rem 0; border-bottom: 1px solid #eee; }}
+                .stat:last-child {{ border-bottom: none; }}
+                .val {{ font-weight: bold; }}
+                .profit {{ color: {'#2ecc71' if profit >= 0 else '#e74c3c'}; }}
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h2>🤖 Bot Dashboard</h2>
+                <div class="stat"><span>สถานะ:</span> <span class="val" style="color: #2ecc71;">● Running</span></div>
+                <div class="stat"><span>เทรดทั้งหมด:</span> <span class="val">{total_trades} ไม้</span></div>
+                <div class="stat"><span>Win Rate:</span> <span class="val">{win_rate:.1f}%</span></div>
+                <div class="stat"><span>ชนะ / แพ้:</span> <span class="val">{wins} / {losses}</span></div>
+                <div class="stat"><span>กำไรรวม:</span> <span class="val profit">{profit:.2f} USD</span></div>
+            </div>
+        </body>
+    </html>
+    """
+    return html_content
 
 async def sync_portfolio_state(msg):
-    """ (Fix 1) ตรวจสอบพอร์ตจริงกับ DB ให้ตรงกัน """
+    """ (Fix 1) ตรวจสอบพอร์ตจริงกับ DB """
     if "portfolio" in msg:
         contracts = msg["portfolio"].get("contracts", [])
         active_ids = [c["contract_id"] for c in contracts]
         
         if bot_state["active_trade"]:
             if bot_state["contract_id"] not in active_ids:
-                # DB บอกว่ามีออเดอร์ แต่พอร์ตจริงบอกไม่มี = Ghost Order!
                 await update_state({"active_trade": False, "contract_id": None, "signal_type": ""})
                 await telegram.send("🧹 <b>Auto-Correct:</b> ลบ Ghost Order ออกจากระบบแล้ว")
             else:
-                # ออเดอร์ยังมีชีวิตอยู่ สั่งติดตามต่อ
                 await deriv.send({"proposal_open_contract": 1, "contract_id": bot_state["contract_id"], "subscribe": 1})
 
 async def active_trade_manager(msg):
@@ -98,17 +134,21 @@ async def active_trade_manager(msg):
             await update_state({"entry_price": entry_spot})
 
         if is_sold:
+            # อัปเดตสถิติผลประกอบการ
+            new_profit = bot_state.get("total_profit", 0.0) + profit
+            wins = bot_state.get("win_count", 0) + (1 if profit > 0 else 0)
+            losses = bot_state.get("loss_count", 0) + (1 if profit <= 0 else 0)
+
             await update_state({
                 "active_trade": False, "contract_id": None, 
-                "is_breakeven": False, "entry_price": 0, "sl": 0, "tp": 0, "signal_type": ""
+                "is_breakeven": False, "entry_price": 0, "sl": 0, "tp": 0, "signal_type": "",
+                "total_profit": new_profit, "win_count": wins, "loss_count": losses
             })
-            local_mem["sell_triggered"] = False # Reset Flag
-            
-            # (Fix 7) ล้าง Subscription คืน Memory ให้ Deriv
+            local_mem["sell_triggered"] = False
             await deriv.send({"forget_all": "proposal_open_contract"})
             
             emoji = "🟢" if profit > 0 else "🔴"
-            await telegram.send(f"{emoji} <b>Trade Closed!</b>\nProfit: {profit:.2f} USD")
+            await telegram.send(f"{emoji} <b>Trade Closed!</b>\nProfit: {profit:.2f} USD\n💰 Total: {new_profit:.2f} USD")
             return
 
         # Failsafe Local Cut
@@ -119,7 +159,6 @@ async def active_trade_manager(msg):
 
             if should_close:
                 current_time = time.time()
-                # (Fix 6) ใช้ sell_triggered กัน Flood
                 if not local_mem["sell_triggered"] and (current_time - local_mem["last_sell_time"] > 10):
                     await deriv.send({"sell": c_id, "price": 0})
                     local_mem["last_sell_time"] = current_time
@@ -138,8 +177,6 @@ async def active_trade_manager(msg):
                     await telegram.send("🛡️ <b>Break-even:</b> ขยับ SL บังทุนแล้ว")
 
 async def request_history():
-    """ (Fix 9) ฟังก์ชันจัดการขอประวัติกราฟแยกออกมาชัดเจน """
-    # ใช้ timestamp เพื่อให้ req_id ไม่ชนกัน
     req_1m = int(time.time() * 1000) % 10000 
     req_15m = req_1m + 1
     await deriv.send({"ticks_history": SYMBOL, "end": "latest", "count": 300, "granularity": 60, "style": "candles", "req_id": req_1m, "subscribe": 1})
@@ -153,59 +190,39 @@ async def trading_loop():
     while True:
         try:
             await deriv.connect()
-            
-            # (Fix 1) ยิงขอ Portfolio ทันทีที่ต่อเน็ตติด
             await deriv.send({"portfolio": 1})
-            
-            # ถ้าเน็ตหลุด Deque ไม่หาย แต่ต้องร้องขอ History ใหม่ทับเข้าไป
             req_1m, req_15m = await request_history()
 
             while True:
                 try:
-                    # 🛡️ Watchdog: ใส่ Timeout 30 วินาที ป้องกันการค้าง
-                    # ถ้าเกิน 30 วิไม่มีข้อมูลเข้าเลย ให้เตะออกไป Reconnect ใหม่
+                    # 🛡️ Watchdog: กันบอทค้างถ้านิ่งเกิน 30 วิ
                     msg = await asyncio.wait_for(deriv.receive(), timeout=30.0)
                 except asyncio.TimeoutError:
-                    print("⏳ Connection frozen (Watchdog Timeout). Forcing reconnect...")
-                    await telegram.send("🔄 <b>Watchdog:</b> ตรวจพบเซิร์ฟเวอร์เงียบเกิน 30 วิ กำลังรีเซ็ตการเชื่อมต่อ...")
-                    break  # ทะลุออกจาก Loop เล็ก เพื่อไปเริ่ม connect ใหม่ใน Loop ใหญ่
+                    print("⏳ Connection frozen (Watchdog). Reconnecting...")
+                    await telegram.send("🔄 <b>Watchdog:</b> ตรวจพบอาการค้าง กำลังรีเซ็ตการเชื่อมต่อ...")
+                    break 
 
-                if not msg:
-                    continue
-                
+                if not msg: continue
                 await sync_portfolio_state(msg)
                 
                 if "error" in msg:
                     err = msg['error'].get('message', 'Unknown')
                     err_lower = err.lower()
                     
-                    # คีย์เวิร์ดที่แสดงว่าออเดอร์อาจจะปิดไปแล้ว หรือมีปัญหาการขาย
+                    # 🛠️ Auto-Reset เมื่อเจอ Error ที่ทำให้ State ค้าง
                     force_reset_keywords = ["process your trade", "invalid contract", "sold", "expired"]
                     
                     if any(keyword in err_lower for keyword in force_reset_keywords):
                         print(f"Auto-Resetting State due to Error: {err}")
-                        await telegram.send(f"🔄 <b>Auto-Reset:</b> รีเซ็ตสถานะบอทให้ว่าง เพื่อหาออเดอร์ใหม่ (สาเหตุ: {err})")
-                        
-                        # 1. บังคับล้าง State ให้เป็นพอร์ตว่าง
+                        await telegram.send(f"🔄 <b>Auto-Reset:</b> รีเซ็ตสถานะบอทให้ว่าง (สาเหตุ: {err})")
                         await update_state({
-                            "active_trade": False, 
-                            "contract_id": None, 
-                            "is_breakeven": False, 
-                            "entry_price": 0, 
-                            "sl": 0, 
-                            "tp": 0, 
-                            "signal_type": ""
+                            "active_trade": False, "contract_id": None, "is_breakeven": False, 
+                            "entry_price": 0, "sl": 0, "tp": 0, "signal_type": ""
                         })
                         local_mem["sell_triggered"] = False
-                        
-                        # 2. ล้างการติดตามสัญญาเดิมที่ค้างในระบบ
                         await deriv.send({"forget_all": "proposal_open_contract"})
-                        
-                        # 3. ร้องขอตรวจสอบพอร์ตปัจจุบันอีกรอบเพื่อความชัวร์
                         await deriv.send({"portfolio": 1})
-                        
                     else:
-                        # Error อื่นๆ ที่ไม่เกี่ยวกับการปิดออเดอร์ ให้แจ้งเตือนปกติ
                         await telegram.send(f"⚠️ <b>API Error:</b> {err}")
                         if bot_state["active_trade"] and bot_state["contract_id"] is None:
                             await update_state({"active_trade": False, "signal_type": ""})
@@ -232,17 +249,15 @@ async def trading_loop():
                     ohlc = msg["ohlc"]
                     granularity = ohlc.get("granularity")
                     open_time = ohlc["open_time"]
-                    
                     target_deque = candles_1m if granularity == 60 else candles_15m
                     
                     if len(target_deque) > 0:
                         last_candle = target_deque[-1]
                         
-                        # (Fix 4) Gap Detection - ถ้าระยะห่างแท่งเกิน 2 เท่าของ Timeframe (หลุดนาน)
                         if open_time - last_candle['time'] > (granularity * 2):
                             await telegram.send(f"⏳ <b>Data Gap Detected ({granularity}s):</b> Refetching...")
                             req_1m, req_15m = await request_history()
-                            continue # ข้ามลูปไปรอ History ใหม่
+                            continue 
 
                         if open_time == last_candle['time']:
                             for k in ['close', 'high', 'low']: last_candle[k] = float(ohlc[k])
@@ -255,7 +270,6 @@ async def trading_loop():
                                         df_1m = pd.DataFrame(list(candles_1m))
                                         df_15m = pd.DataFrame(list(candles_15m))
                                         
-                                        # (Fix 5) ใส่ Timeout ให้ Analyzer กันค้าง
                                         signal, sl_dist, tp_dist = await asyncio.wait_for(
                                             asyncio.to_thread(strategy.analyze, df_1m, df_15m), 
                                             timeout=5.0
@@ -266,19 +280,13 @@ async def trading_loop():
                                             sl_price = curr_price - sl_dist if signal == 'BUY' else curr_price + sl_dist
                                             tp_price = curr_price + tp_dist if signal == 'BUY' else curr_price - tp_dist
                                             
-                                            # (Fix 8) แก้ Hardcode ให้ดึงจาก Config หรือ Balance อนาคต
                                             stake = 10 
                                             mult = 100
                                             sl_amount = round((sl_dist / curr_price) * mult * stake, 2)
                                             tp_amount = round((tp_dist / curr_price) * mult * stake, 2)
 
                                             max_sl = stake * 0.95
-                                            if sl_amount > max_sl:
-                                                sl_amount = max_sl
-
-                                            # 🐛 แนะนำให้ปริ้นท์ค่าดูใน Console เพื่อให้เห็นภาพ
-                                            print(f"🚀 เตรียมยิงออเดอร์ {signal} | Stake={stake}, Mult={mult}")
-                                            print(f"📊 SL Amount: {sl_amount} USD | TP Amount: {tp_amount} USD")
+                                            if sl_amount > max_sl: sl_amount = max_sl
 
                                             await update_state({
                                                 "signal_type": signal, "sl": sl_price, "tp": tp_price, 
@@ -294,18 +302,16 @@ async def trading_loop():
                                                 }
                                             })
                                     except asyncio.TimeoutError:
-                                        await telegram.send("⏱️ <b>Analyzer Timeout:</b> ประมวลผลนานเกิน 5 วินาที ข้ามแท่งนี้")
+                                        await telegram.send("⏱️ <b>Analyzer Timeout:</b> ข้ามแท่งนี้")
                                     except Exception as calc_err:
                                         print(f"Indicator Error: {calc_err}")
                             
                             target_deque.append({"time": open_time, "open": float(ohlc['open']), "high": float(ohlc['high']), "low": float(ohlc['low']), "close": float(ohlc['close'])})
 
-        # (Fix 10) Exception Handler ชัดเจน
         except websockets.exceptions.ConnectionClosed as e:
             await telegram.send(f"🔌 <b>Connection Dropped:</b> {e.code}. Reconnecting...")
             await asyncio.sleep(5)
         except Exception as e:
-            # ใช้ logger ในอนาคตได้ แต่ตอนนี้ print เพื่อไม่ให้ spam Telegram หากมีบัค logic
             print(f"Critical System Error: {e}")
-            await telegram.send(f"❌ <b>System Crash:</b> เกิดข้อผิดพลาดร้ายแรง รีสตาร์ทใน 10วิ")
+            await telegram.send(f"❌ <b>System Crash:</b> รีสตาร์ทใน 10วิ")
             await asyncio.sleep(10)
