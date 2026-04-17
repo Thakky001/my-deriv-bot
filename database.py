@@ -26,24 +26,30 @@ class SupabaseDB:
         try:
             session = await self.get_session()
             url = f"{SUPABASE_URL}/rest/v1/bot_state?select=*&id=eq.1"
-            # เพิ่ม timeout=10 ป้องกันการค้างเวลารอโหลด State
             async with session.get(url, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
+                    if not data:
+                        print("⚠️ [Database] ตาราง bot_state ว่างเปล่า! (คุณลืมกด Insert Row เพื่อสร้าง id=1 หรือเปล่า?)")
                     return data[0] if data else None
+                else:
+                    err_msg = await resp.text()
+                    print(f"❌ [Database Read Error] Status {resp.status}: {err_msg}")
             return None
         except Exception as e:
-            print(f"Database Read Error: {e}")
+            print(f"❌ [Database Crash]: {e}")
             return None
 
     async def update_state(self, payload: dict):
         try:
             session = await self.get_session()
             url = f"{SUPABASE_URL}/rest/v1/bot_state?id=eq.1"
-            # เพิ่ม timeout=10 ป้องกันการค้างเวลาเซฟ State
             async with session.patch(url, json=payload, timeout=10) as resp:
-                return resp.status == 200
+                if resp.status not in [200, 204]:
+                    err_msg = await resp.text()
+                    print(f"❌ [Database Write Error] Status {resp.status}: {err_msg}")
+                    return False
+                return True
         except Exception as e:
-            print(f"Database Write Error: {e}")
-            # ส่ง False กลับไป ดีกว่าปล่อยให้แอปค้างหรือแครช
+            print(f"❌ [Database Crash]: {e}")
             return False
