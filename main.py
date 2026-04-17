@@ -268,16 +268,31 @@ async def root():
     return html_content
 
 async def sync_portfolio_state(msg):
+    """ ตรวจสอบสถานะพอร์ตตอนเริ่มระบบ เพื่อเคลียร์ออเดอร์ค้าง (Ghost Order) """
     if "portfolio" in msg:
         contracts = msg["portfolio"].get("contracts", [])
         active_ids = [c["contract_id"] for c in contracts]
         
         if bot_state["active_trade"]:
+            # กรณีที่ 1: ในระบบบอกว่ามีออเดอร์ แต่ในพอร์ตจริงไม่มีแล้ว (ชน TP/SL ตอนบอทปิดอยู่)
             if bot_state["contract_id"] not in active_ids:
-                await update_state({"active_trade": False, "contract_id": None, "signal_type": ""})
-                await telegram.send("🧹 <b>Auto-Correct:</b> ลบ Ghost Order ออกจากระบบแล้ว")
+                await update_state({
+                    "active_trade": False, 
+                    "contract_id": None, 
+                    "signal_type": "",
+                    "entry_price": 0,
+                    "is_breakeven": False
+                })
+                await telegram.send("🧹 <b>Startup Cleanup:</b> เคลียร์สถานะออเดอร์ค้างเก่าเรียบร้อย")
+            
+            # กรณีที่ 2: ออเดอร์ยังรันอยู่จริง ให้ทำการ Subscribe เพื่อติดตามผลต่อ
             else:
-                await deriv.send({"proposal_open_contract": 1, "contract_id": bot_state["contract_id"], "subscribe": 1})
+                await deriv.send({
+                    "proposal_open_contract": 1, 
+                    "contract_id": bot_state["contract_id"], 
+                    "subscribe": 1
+                })
+                await telegram.send("🛰️ <b>System:</b> กำลังติดตามออเดอร์ที่ค้างอยู่ต่อ...")
 
 async def active_trade_manager(msg):
     if "proposal_open_contract" in msg:
@@ -343,12 +358,22 @@ async def trading_loop():
     while True:
         try:
             await deriv.connect()
+            
+            # --- [จุดที่แก้ไข 1] เช็คพอร์ตครั้งเดียวตอนเชื่อมต่อสำเร็จ ---
             await deriv.send({"portfolio": 1})
+            for _ in range(5): # ลองเช็ค 5 ข้อความแรก
+                init_msg = await deriv.receive()
+                if init_msg and "portfolio" in init_msg:
+                    await sync_portfolio_state(init_msg)
+                    break
+            if init_msg and "portfolio" in init_msg:
+                await sync_portfolio_state(init_msg)
+            # -----------------------------------------------------
+
             req_1m, req_15m = await request_history()
 
             while True:
                 try:
-                    # Watchdog
                     msg = await asyncio.wait_for(deriv.receive(), timeout=30.0)
                 except asyncio.TimeoutError:
                     print("⏳ Connection frozen (Watchdog). Reconnecting...")
@@ -356,12 +381,14 @@ async def trading_loop():
                     break 
 
                 if not msg: continue
-                await sync_portfolio_state(msg)
+                
+                # --- [จุดที่แก้ไข 2] ลบบรรทัดเดิมที่เคยเรียก sync_portfolio_state(msg) ตรงนี้ออก ---
+                # เพื่อป้องกันไม่ให้มันไปลบข้อมูล active_trade ก่อนที่ manager จะคำนวณกำไรเสร็จ
                 
                 if "error" in msg:
+                    # ... (โค้ดจัดการ Error ส่วนเดิมของคุณ) ...
                     err = msg['error'].get('message', 'Unknown')
                     err_lower = err.lower()
-                    
                     force_reset_keywords = ["process your trade", "invalid contract", "sold", "expired"]
                     
                     if any(keyword in err_lower for keyword in force_reset_keywords):
@@ -385,6 +412,7 @@ async def trading_loop():
                     await deriv.send({"proposal_open_contract": 1, "contract_id": c_id, "subscribe": 1})
                     await telegram.send(f"✅ <b>Order Placed:</b> {c_id}")
                 
+                # ให้ฟังก์ชันนี้เป็นคนรับผิดชอบเรื่องการบันทึกกำไรและการปิดออเดอร์แต่เพียงผู้เดียว
                 await active_trade_manager(msg)
 
                 if "candles" in msg:
