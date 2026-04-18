@@ -45,7 +45,9 @@ bot_state = {
 local_mem = {
     "last_sell_time": 0,
     "sell_triggered": False,
-    "is_processing_close": False 
+    "is_processing_close": False,
+    "last_heartbeat": 0,
+    "last_1m_candle_time": time.time()
 }
 
 # [Fix 8] ระบบ Cache สำหรับ Dashboard ป้องกัน API Quota Limit
@@ -302,7 +304,8 @@ async def active_trade_manager(msg):
         if bot_state["active_trade"] and bot_state["contract_id"] is None:
             await update_state({"contract_id": c_id})
             
-        if bot_state["contract_id"] != c_id: return
+        # [Fix C] ตรวจสอบ Type-Safe ป้องกันฐานข้อมูลแปลงตัวเลขเป็นอักษรแล้วหาไม่เจอ
+        if bot_state["contract_id"] and str(bot_state["contract_id"]) != str(c_id): return
 
         profit = float(contract.get("profit") or 0.0)
         entry_spot = float(contract.get("entry_spot") or 0.0)
@@ -370,6 +373,8 @@ async def trading_loop():
             # [Fix 3] เคลียร์สถานะใน Memory ทันทีที่เชื่อมต่อใหม่ ป้องกันบอทค้างไม่ยอมออกออเดอร์
             local_mem["sell_triggered"] = False
             local_mem["is_processing_close"] = False
+            local_mem["last_heartbeat"] = 0
+            local_mem["last_1m_candle_time"] = time.time()
             
             await deriv.send({"portfolio": 1})
             for _ in range(5): 
@@ -389,6 +394,20 @@ async def trading_loop():
                     break 
 
                 if not msg: continue
+                
+                now = time.time()
+                
+                # [Fix A] Stream Watchdog: เช็คว่ากราฟ 1 นาทีหยุดอัปเดตไปเกิน 90 วินาทีหรือไม่
+                if now - local_mem["last_1m_candle_time"] > 90 and len(candles_1m) > 0:
+                    print("⏳ 1m Stream frozen! Reconnecting...")
+                    await telegram.send("⚠️ <b>Stream Dead:</b> กราฟ 1 นาทีหยุดอัปเดต กำลังรีเซ็ตการเชื่อมต่อ...")
+                    break
+                    
+                # [Fix B] Independent Heartbeat: กระตุ้นถามสถานะออเดอร์ด้วยตัวเองทุกๆ 20 วินาที
+                if bot_state["active_trade"] and bot_state["contract_id"]:
+                    if now - local_mem["last_heartbeat"] > 20:
+                        local_mem["last_heartbeat"] = now
+                        await deriv.send({"proposal_open_contract": 1, "contract_id": bot_state["contract_id"]})
                 
                 if "error" in msg:
                     err = msg['error'].get('message', 'Unknown')
@@ -434,6 +453,9 @@ async def trading_loop():
                     open_time = ohlc["open_time"]
                     target_deque = candles_1m if granularity == 60 else candles_15m
                     
+                    if granularity == 60:
+                        local_mem["last_1m_candle_time"] = time.time()
+                    
                     if len(target_deque) > 0:
                         last_candle = target_deque[-1]
                         
@@ -448,9 +470,6 @@ async def trading_loop():
                             
                             if granularity == 60:
                                 
-                                if bot_state["active_trade"] and bot_state["contract_id"]:
-                                    await deriv.send({"proposal_open_contract": 1, "contract_id": bot_state["contract_id"]})
-                                    
                                 if not bot_state["active_trade"] and len(candles_15m) > 0:
                                     if last_processed_time != last_candle['time']:
                                         last_processed_time = last_candle['time']
