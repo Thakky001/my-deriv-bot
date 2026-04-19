@@ -299,6 +299,9 @@ async def active_trade_manager(msg):
         contract = msg["proposal_open_contract"]
         if not contract: return
 
+        if not bot_state["active_trade"]: 
+            return
+
         c_id = contract.get("contract_id")
         
         if bot_state["active_trade"] and bot_state["contract_id"] is None:
