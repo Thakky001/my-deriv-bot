@@ -47,7 +47,8 @@ local_mem = {
     "sell_triggered": False,
     "is_processing_close": False,
     "last_heartbeat": 0,
-    "last_1m_candle_time": time.time()
+    "last_1m_candle_time": time.time(),
+    "last_quiet_date": ""
 }
 
 # [Fix 8] ระบบ Cache สำหรับ Dashboard ป้องกัน API Quota Limit
@@ -486,7 +487,7 @@ async def trading_loop():
                                                 timeout=5.0
                                             )
                                             
-                                            if signal:
+                                            if signal in ['BUY', 'SELL']:
                                                 curr_price = last_candle['close']
                                                 sl_price = curr_price - sl_dist if signal == 'BUY' else curr_price + sl_dist
                                                 tp_price = curr_price + tp_dist if signal == 'BUY' else curr_price - tp_dist
@@ -512,6 +513,11 @@ async def trading_loop():
                                                         "limit_order": {"stop_loss": sl_amount, "take_profit": tp_amount}
                                                     }
                                                 })
+                                            elif signal == 'QUIET':
+                                                today_str = datetime.now(TH_TZ).strftime("%Y-%m-%d")
+                                                if local_mem["last_quiet_date"] != today_str:
+                                                    local_mem["last_quiet_date"] = today_str
+                                                    await telegram.send("💤 <b>Market Status:</b> ตลาดค่อนข้างเงียบ (ADX < 20) แนะนำให้พักผ่อนหรือรอจังหวะเทรนด์ใหม่ที่ชัดเจนครับ")
                                         except asyncio.TimeoutError:
                                             await telegram.send("⏱️ <b>Analyzer Timeout:</b> ข้ามแท่งนี้")
                                         except Exception as calc_err:
