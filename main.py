@@ -472,15 +472,30 @@ async def trading_loop():
                             for k in ['close', 'high', 'low']: last_candle[k] = float(ohlc[k])
                         elif open_time > last_candle['time']:
                             
+                            # [จุดแก้ไข 1] บันทึกเวลาของแท่งที่เพิ่งปิดไว้ก่อน
+                            closed_candle_time = last_candle['time']
+                            
+                            # [จุดแก้ไข 2] ย้ายการ Append มาทำ "ก่อน" Analyze เสมอ!
+                            # เพื่อให้ df_1m.iloc[-2] ใน indicators.py ชี้ไปที่แท่งที่เพิ่งปิดได้อย่างถูกต้อง 100%
+                            target_deque.append({
+                                "time": open_time, 
+                                "open": float(ohlc['open']), 
+                                "high": float(ohlc['high']), 
+                                "low": float(ohlc['low']), 
+                                "close": float(ohlc['close'])
+                            })
+                            
                             if granularity == 60:
                                 
                                 if not bot_state["active_trade"] and len(candles_15m) > 0:
-                                    if last_processed_time != last_candle['time']:
-                                        last_processed_time = last_candle['time']
+                                    # เช็คด้วยเวลาของแท่งที่เพิ่งปิด ป้องกันการวิเคราะห์ซ้ำ
+                                    if last_processed_time != closed_candle_time:
+                                        last_processed_time = closed_candle_time
                                         
                                         try:
-                                            df_1m = pd.DataFrame(tuple(candles_1m))
-                                            df_15m = pd.DataFrame(tuple(candles_15m))
+                                            # ใช้ list() แทน tuple() จะเป็นมาตรฐานของ Pandas มากกว่า
+                                            df_1m = pd.DataFrame(list(candles_1m))
+                                            df_15m = pd.DataFrame(list(candles_15m))
                                             
                                             signal, sl_dist, tp_dist = await asyncio.wait_for(
                                                 asyncio.to_thread(strategy.analyze, df_1m, df_15m), 
@@ -488,7 +503,8 @@ async def trading_loop():
                                             )
                                             
                                             if signal in ['BUY', 'SELL']:
-                                                curr_price = last_candle['close']
+                                                # [จุดแก้ไข 3] เมื่อสัญญาณมา ให้ใช้ "ราคาเปิดของแท่งใหม่" เป็นตัวอ้างอิง
+                                                curr_price = float(ohlc['open'])
                                                 sl_price = curr_price - sl_dist if signal == 'BUY' else curr_price + sl_dist
                                                 tp_price = curr_price + tp_dist if signal == 'BUY' else curr_price - tp_dist
                                                 
@@ -522,8 +538,6 @@ async def trading_loop():
                                             await telegram.send("⏱️ <b>Analyzer Timeout:</b> ข้ามแท่งนี้")
                                         except Exception as calc_err:
                                             print(f"Indicator Error: {calc_err}")
-                            
-                            target_deque.append({"time": open_time, "open": float(ohlc['open']), "high": float(ohlc['high']), "low": float(ohlc['low']), "close": float(ohlc['close'])})
 
         except websockets.exceptions.ConnectionClosed as e:
             await telegram.send(f"🔌 <b>Connection Dropped:</b> {e.code}. Reconnecting...")
